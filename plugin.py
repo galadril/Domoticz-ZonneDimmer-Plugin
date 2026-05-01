@@ -291,19 +291,20 @@ class BasePlugin:
             # Try multiple patterns to extract bearer token from HTML
             # Priority: localStorage.setItem is the most reliable method used by the actual site
             token_patterns = [
-                r'localStorage\.setItem\(["\']token["\']\s*,\s*["\']([0-9]+\|[a-zA-Z0-9]+)["\']',  # localStorage.setItem("token", '123|abc')
+                r'localStorage\.setItem\s*\(\s*["\']token["\']\s*,\s*["\']([0-9]+\|[a-zA-Z0-9]+)["\']',  # localStorage.setItem("token", '123|abc')
+                r'localStorage\.setItem\s*\(\s*"token"\s*,\s*"([0-9]+\|[a-zA-Z0-9]+)"',  # localStorage.setItem("token", "123|abc")
+                r"localStorage\.setItem\s*\(\s*'token'\s*,\s*'([0-9]+\|[a-zA-Z0-9]+)'",  # localStorage.setItem('token', '123|abc')
+                r'["\']([0-9]{3,5}\|[a-zA-Z0-9]{30,})["\']',  # Generic: "7727|IapiP4AnkU8..." or '7727|IapiP4AnkU8...'
                 r'Bearer\s+([\d]+\|[\w]+)',  # Bearer 123|abc
-                r'bearer["\s:]+([0-9]+\|[a-zA-Z0-9]+)',  # bearer: "123|abc" or bearer":"123|abc"
+                r'bearer["\s:]+([0-9]+\|[a-zA-Z0-9]+)',  # bearer: "123|abc"
                 r'Authorization["\s:]+Bearer\s+([0-9]+\|[a-zA-Z0-9]+)',  # Authorization: Bearer 123|abc
-                r'"token"["\s:]+([0-9]+\|[a-zA-Z0-9]+)',  # "token":"123|abc"
-                r'api[_-]?token["\s:]+([0-9]+\|[a-zA-Z0-9]+)',  # api_token or api-token
             ]
 
             for pattern in token_patterns:
                 token_match = re.search(pattern, dashboard_html, re.IGNORECASE)
                 if token_match:
                     self.bearer_token = token_match.group(1)
-                    Domoticz.Log(f"Bearer token obtained using pattern '{pattern}': {self.bearer_token[:20]}...")
+                    Domoticz.Log(f"Bearer token obtained using pattern: {self.bearer_token[:20]}...")
                     Domoticz.Log(f"Bearer token length: {len(self.bearer_token)} characters")
                     self.auth_failed_counter = 0  # Reset auth failure counter on successful token extraction
                     break
@@ -311,28 +312,41 @@ class BasePlugin:
             if not self.bearer_token:
                 # Bearer token might be set via API call, store session for now
                 Domoticz.Log("Bearer token not found in page, will use session authentication")
-                Domoticz.Debug("Searching for 'Bearer' in dashboard HTML...")
-                bearer_lower = dashboard_html.lower()
-                if 'bearer' in bearer_lower:
-                    # Find all occurrences and log context
-                    index = 0
-                    occurrences = 0
-                    while True:
-                        index = bearer_lower.find('bearer', index)
-                        if index == -1:
-                            break
-                        occurrences += 1
-                        # Log 100 chars before and after
+
+                # Search for localStorage.setItem with token
+                Domoticz.Debug("Searching for 'localStorage' in dashboard HTML...")
+                html_lower = dashboard_html.lower()
+                if 'localstorage' in html_lower:
+                    index = html_lower.find('localstorage')
+                    if index != -1:
                         start = max(0, index - 50)
-                        end = min(len(dashboard_html), index + 100)
+                        end = min(len(dashboard_html), index + 300)
                         context = dashboard_html[start:end].replace('\n', ' ').replace('\r', '')
-                        Domoticz.Debug(f"Bearer occurrence #{occurrences} at pos {index}: ...{context}...")
-                        index += 6  # Move past 'bearer'
-                        if occurrences >= 5:  # Limit to first 5 occurrences
-                            break
-                    Domoticz.Debug(f"Found 'bearer' text {occurrences}+ times but no pattern matched")
+                        Domoticz.Debug(f"localStorage found at pos {index}: ...{context}...")
+
+                # Search for setItem("token" or setItem('token'
+                if 'setitem' in html_lower:
+                    index = html_lower.find('setitem')
+                    if index != -1:
+                        start = max(0, index - 50)
+                        end = min(len(dashboard_html), index + 200)
+                        context = dashboard_html[start:end].replace('\n', ' ').replace('\r', '')
+                        Domoticz.Debug(f"setItem found at pos {index}: ...{context}...")
+
+                # Try to find any token-like pattern (number|alphanumeric)
+                token_pattern = r'([0-9]{3,5}\|[a-zA-Z0-9]{30,})'
+                matches = re.findall(token_pattern, dashboard_html)
+                if matches:
+                    Domoticz.Debug(f"Found {len(matches)} potential token(s) in HTML:")
+                    for i, match in enumerate(matches[:3]):  # Show first 3
+                        Domoticz.Debug(f"  Token candidate #{i+1}: {match[:20]}... (length: {len(match)})")
+                        # Try using the first match
+                        if i == 0:
+                            Domoticz.Log(f"Using first token candidate as bearer token")
+                            self.bearer_token = match
+                            self.auth_failed_counter = 0
                 else:
-                    Domoticz.Debug("No 'bearer' text found in dashboard HTML")
+                    Domoticz.Debug("No token-like patterns (number|string) found in HTML")
 
             Domoticz.Log("Login successful!")
             self.login_retry_counter = 0  # Reset retry counter on successful login
