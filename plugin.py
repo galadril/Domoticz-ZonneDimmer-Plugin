@@ -1,5 +1,5 @@
 """
-<plugin key="ZonneDimmer" name="ZonneDimmer Integration" author="galadril" version="1.1.0" wikilink="https://www.zonnedimmer.nl" externallink="https://github.com/galadril/Domoticz-ZonneDimmer-Plugin">
+<plugin key="ZonneDimmer" name="ZonneDimmer Integration" author="galadril" version="1.2.0" wikilink="https://www.zonnedimmer.nl" externallink="https://github.com/galadril/Domoticz-ZonneDimmer-Plugin">
     <description>
         <h2>ZonneDimmer Integration Plugin</h2><br/>
         This plugin integrates Domoticz with ZonneDimmer to control your solar inverter dimming functionality.<br/>
@@ -185,11 +185,13 @@ class BasePlugin:
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
             req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
             req.add_header('Accept-Language', 'en-GB,en;q=0.9')
-            req.add_header('Accept-Encoding', 'gzip, deflate, br')
+            req.add_header('Accept-Encoding', 'gzip, deflate')
             req.add_header('Connection', 'keep-alive')
             req.add_header('Upgrade-Insecure-Requests', '1')
             response = opener.open(req, timeout=10)
+            Domoticz.Log(f"Login page loaded: HTTP {response.status}")
             html = response.read().decode('utf-8')
+            Domoticz.Debug(f"Login page HTML size: {len(html)} bytes")
 
             # Extract CSRF token
             match = re.search(r'name="_token"\s+value="([^"]+)"', html)
@@ -199,7 +201,7 @@ class BasePlugin:
                 return
 
             csrf_token = match.group(1)
-            Domoticz.Debug(f"CSRF token obtained: {csrf_token[:20]}...")
+            Domoticz.Log(f"CSRF token obtained: {csrf_token[:20]}...")
 
             # Step 2: Perform login
             Domoticz.Log("Submitting login credentials...")
@@ -224,6 +226,8 @@ class BasePlugin:
             req.add_header('Upgrade-Insecure-Requests', '1')
 
             response = opener.open(req, timeout=10)
+            Domoticz.Log(f"Login POST response: HTTP {response.status}")
+            Domoticz.Log(f"Login redirect to: {response.geturl()}")
 
             # Step 3: Store session cookies
             cookie_list = []
@@ -232,7 +236,11 @@ class BasePlugin:
 
             if cookie_list:
                 self.session_cookie = "; ".join(cookie_list)
-                Domoticz.Debug(f"Session cookie stored: {len(self.session_cookie)} characters")
+                Domoticz.Log(f"Session cookies stored: {len(cookie_list)} cookies, {len(self.session_cookie)} chars total")
+                for cookie in cookie_jar:
+                    Domoticz.Debug(f"  Cookie: {cookie.name} = {cookie.value[:20]}... (expires: {cookie.expires or 'session'})")
+            else:
+                Domoticz.Error("No session cookies received from login!")
 
             # Step 4: Try to get bearer token from API
             # After login, we can access API endpoints
@@ -243,10 +251,12 @@ class BasePlugin:
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
             req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
             req.add_header('Accept-Language', 'en-GB,en;q=0.9')
-            req.add_header('Accept-Encoding', 'gzip, deflate, br')
+            req.add_header('Accept-Encoding', 'gzip, deflate')
             req.add_header('Connection', 'keep-alive')
             response = opener.open(req, timeout=10)
+            Domoticz.Log(f"Dashboard loaded: HTTP {response.status}")
             dashboard_html = response.read().decode('utf-8')
+            Domoticz.Debug(f"Dashboard HTML size: {len(dashboard_html)} bytes")
 
             # Try to extract bearer token from JavaScript or meta tags
             # Pattern: Bearer tokens are typically in format: number|string
@@ -254,20 +264,39 @@ class BasePlugin:
             if token_match:
                 self.bearer_token = token_match.group(1)
                 Domoticz.Log(f"Bearer token obtained: {self.bearer_token[:20]}...")
+                Domoticz.Log(f"Bearer token length: {len(self.bearer_token)} characters")
             else:
                 # Bearer token might be set via API call, store session for now
-                Domoticz.Log("Bearer token not found in page, using session authentication")
+                Domoticz.Log("Bearer token not found in page, will use session authentication")
+                Domoticz.Debug("Searching for 'Bearer' in dashboard HTML...")
+                if 'bearer' in dashboard_html.lower():
+                    Domoticz.Debug("Found 'bearer' text but pattern didn't match")
+                else:
+                    Domoticz.Debug("No 'bearer' text found in dashboard HTML")
 
             Domoticz.Log("Login successful!")
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, "Connected")
 
         except urllib.error.HTTPError as e:
             Domoticz.Error(f"HTTP Error during login: {e.code} - {e.reason}")
+            Domoticz.Error(f"Failed URL: {e.url}")
+            try:
+                error_body = e.read().decode('utf-8')
+                if len(error_body) < 500:
+                    Domoticz.Error(f"Error response: {error_body}")
+                else:
+                    Domoticz.Error(f"Error response (first 500 chars): {error_body[:500]}...")
+            except:
+                Domoticz.Error("Could not read error response body")
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Login failed: {e.code}")
         except Exception as e:
-            Domoticz.Error(f"Login failed: {str(e)}")
+            Domoticz.Error(f"Login failed with exception: {str(e)}")
+            Domoticz.Error(f"Exception type: {type(e).__name__}")
             import traceback
-            Domoticz.Error(traceback.format_exc())
+            Domoticz.Error("Full traceback:")
+            for line in traceback.format_exc().split('\n'):
+                if line.strip():
+                    Domoticz.Error(f"  {line}")
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Login failed: {str(e)}")
 
     def update_live_data(self):
@@ -285,7 +314,7 @@ class BasePlugin:
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
             req.add_header('Accept', 'application/json')
             req.add_header('Accept-Language', 'en-GB,en;q=0.9')
-            req.add_header('Accept-Encoding', 'gzip, deflate, br')
+            req.add_header('Accept-Encoding', 'gzip, deflate')
             req.add_header('X-Requested-With', 'XMLHttpRequest')
             req.add_header('Connection', 'keep-alive')
             req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
@@ -298,23 +327,35 @@ class BasePlugin:
                 req.add_header('Cookie', self.session_cookie)
 
             with urllib.request.urlopen(req, timeout=10) as response:
-                data = json.loads(response.read().decode('utf-8'))
+                Domoticz.Debug(f"Live data API response: HTTP {response.status}")
+                response_text = response.read().decode('utf-8')
+                Domoticz.Debug(f"Live data response size: {len(response_text)} bytes")
+                data = json.loads(response_text)
 
                 # Extract live power value
                 if 'live' in data and len(data['live']) > 0:
-                    power = float(data['live'][0]) * 1000  # Convert kW to W
+                    power_kw = float(data['live'][0])
+                    power = power_kw * 1000  # Convert kW to W
                     UpdateDevice(self.UNIT_LIVE_POWER, 0, str(power))
-                    Domoticz.Debug(f"Solar generation: {power}W")
-                    UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"OK - {power}W")
+                    Domoticz.Log(f"Solar generation updated: {power:.0f}W ({power_kw:.3f}kW)")
+                    UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"OK - {power:.0f}W")
+                else:
+                    Domoticz.Log("Live data retrieved but no power values available")
+                    Domoticz.Debug(f"Live data: {data.get('live', [])}")
 
         except urllib.error.HTTPError as e:
             Domoticz.Error(f"HTTP Error updating live data: {e.code} - {e.reason}")
+            Domoticz.Error(f"API URL: {url}")
             if e.code == 401:
+                Domoticz.Log("Authentication expired, will re-login on next cycle")
                 self.bearer_token = None
                 self.session_cookie = None
                 self.login()
         except Exception as e:
             Domoticz.Error(f"Error updating live data: {str(e)}")
+            Domoticz.Error(f"Exception type: {type(e).__name__}")
+            import traceback
+            Domoticz.Debug(traceback.format_exc())
 
     def update_dimming_settings(self, enabled, price, curtailment_perc=0):
         """Update dimming settings on ZonneDimmer
@@ -365,7 +406,7 @@ class BasePlugin:
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
             req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
             req.add_header('Accept-Language', 'en-GB,en;q=0.9')
-            req.add_header('Accept-Encoding', 'gzip, deflate, br')
+            req.add_header('Accept-Encoding', 'gzip, deflate')
             req.add_header('Content-Type', 'application/x-www-form-urlencoded')
             req.add_header('Origin', 'https://app.zonnedimmer.nl')
             req.add_header('Connection', 'keep-alive')
@@ -377,21 +418,37 @@ class BasePlugin:
                 req.add_header('Cookie', self.session_cookie)
 
             with urllib.request.urlopen(req, timeout=10) as response:
-                Domoticz.Log(f"Settings updated successfully")
+                Domoticz.Log(f"Settings update response: HTTP {response.status}")
+                Domoticz.Log(f"Settings updated successfully:")
                 Domoticz.Log(f"  Dynamic contract: {'Enabled' if enabled else 'Disabled'}")
                 Domoticz.Log(f"  Price threshold: {price:.3f} EUR/kWh ({price_cents} cents)")
                 if curtailment_perc > 0:
                     Domoticz.Log(f"  Curtailment: {curtailment_perc}%")
+                else:
+                    Domoticz.Log(f"  Curtailment: Automatic")
                 UpdateDevice(self.UNIT_STATUS_TEXT, 0, "Settings updated")
 
         except urllib.error.HTTPError as e:
             Domoticz.Error(f"HTTP Error updating settings: {e.code} - {e.reason}")
+            Domoticz.Error(f"Settings URL: {url}")
+            try:
+                error_body = e.read().decode('utf-8')
+                if len(error_body) < 300:
+                    Domoticz.Error(f"Error response: {error_body}")
+            except:
+                pass
             if e.code == 401 or e.code == 419:  # 419 = CSRF token mismatch
-                Domoticz.Error("Authentication or CSRF token error. May need to re-login.")
+                Domoticz.Error("Authentication or CSRF token error. Will re-login.")
                 self.bearer_token = None
+                self.session_cookie = None
                 self.login()
+            UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Settings failed: {e.code}")
         except Exception as e:
             Domoticz.Error(f"Error updating settings: {str(e)}")
+            Domoticz.Error(f"Exception type: {type(e).__name__}")
+            import traceback
+            Domoticz.Debug(traceback.format_exc())
+            UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Settings error")
 
     def get_csrf_token(self):
         """Get CSRF token from settings page"""
@@ -402,7 +459,7 @@ class BasePlugin:
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
             req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
             req.add_header('Accept-Language', 'en-GB,en;q=0.9')
-            req.add_header('Accept-Encoding', 'gzip, deflate, br')
+            req.add_header('Accept-Encoding', 'gzip, deflate')
             req.add_header('Connection', 'keep-alive')
             req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
 
@@ -410,7 +467,9 @@ class BasePlugin:
                 req.add_header('Cookie', self.session_cookie)
 
             with urllib.request.urlopen(req, timeout=10) as response:
+                Domoticz.Debug(f"Settings page response: HTTP {response.status}")
                 html = response.read().decode('utf-8')
+                Domoticz.Debug(f"Settings page HTML size: {len(html)} bytes")
 
                 # Extract CSRF token from HTML
                 # Look for: <input type="hidden" name="_token" value="...">
@@ -418,14 +477,21 @@ class BasePlugin:
                 match = re.search(r'name="_token"\s+value="([^"]+)"', html)
                 if match:
                     token = match.group(1)
-                    Domoticz.Debug(f"CSRF token obtained: {token[:20]}...")
+                    Domoticz.Log(f"CSRF token from settings page: {token[:20]}...")
                     return token
 
                 Domoticz.Error("Could not find CSRF token in settings page")
+                if '_token' in html:
+                    Domoticz.Debug("Found '_token' text but pattern didn't match")
+                else:
+                    Domoticz.Debug("No '_token' text found in HTML")
                 return None
 
         except Exception as e:
             Domoticz.Error(f"Error getting CSRF token: {str(e)}")
+            Domoticz.Error(f"Exception type: {type(e).__name__}")
+            import traceback
+            Domoticz.Debug(traceback.format_exc())
             return None
 
 def UpdateDevice(Unit, nValue, sValue, TimedOut=0, AlwaysUpdate=False):
