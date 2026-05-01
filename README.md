@@ -1,53 +1,220 @@
-# 🧩 Domoticz Python Plugin Template
+# 🛠️ Domoticz ZonneDimmer Plugin
 
-This repository serves as a **template** for creating Python plugins for Domoticz. It includes a basic structure, sample code, and placeholders to kickstart your plugin development.
-
-----------
-
-## 🚀 How to Use This Template
-
-1.  **Use This Template**  
-
-    Click the green **"Use this template"** button on the top-right of this page to create your own repository.
-    
-3.  **Customize Your Plugin**
-    -   Update `plugin.py` with your plugin logic.
-    -   Modify the `<plugin>` XML block with your plugin's metadata.
-    -   Add any custom assets (e.g., icons) in the `config/` folder.
-  
-4.  **Test Your Plugin**
-    -   Copy the plugin to your Domoticz `plugins` folder and restart Domoticz.
-
-----------
-
-## 📄 Plugin Readme Template
-
-Use the following template for documenting your plugin:
-
-```markdown
-# 🛠️ [Plugin Name]
-
-[Short description of the plugin, e.g., "This plugin integrates Domoticz with [service/device]."]
+This plugin integrates Domoticz with [ZonneDimmer](https://www.zonnedimmer.nl) to control your solar inverter's dimming functionality based on electricity prices.
 
 ---
 
 ## ✨ Features
 
-- [Feature 1, e.g., "Monitor and control [device] from Domoticz."]
-- [Feature 2, e.g., "Supports advanced debugging and detailed logging."]
-- [Feature 3, e.g., "Custom icons for a polished interface."]
+- **Enable/Disable Dimming**: Control dimming with a simple switch device in Domoticz
+- **Price Threshold Control**: Set the electricity price threshold for when dimming should activate using a slider (dimmer) device
+- **Live Monitoring**: Monitor your solar power generation in real-time
+- **Status Monitoring**: Get status updates about the connection and current state
+- **Automatic Updates**: Configurable update interval for fetching live data
 
 ---
 
 ## 📥 Installation
 
-1. **Clone or download this repository**:  
-   git clone https://github.com/your-username/[plugin-repo].git
+1. **Clone or download this repository**:
+   ```bash
+   cd /path/to/domoticz/plugins
+   git clone https://github.com/your-username/Domoticz-ZonneDimmer-Plugin.git ZonneDimmer
+   ```
 
-2.  **Copy the plugin to your Domoticz plugins folder**:
-    cp -R [plugin-repo] /path/to/domoticz/plugins/
-    
-3.  **Restart Domoticz** to load the new plugin:
-    sudo service domoticz.sh restart
-    
+2. **Make the plugin executable**:
+   ```bash
+   chmod +x /path/to/domoticz/plugins/ZonneDimmer/plugin.py
+   ```
+
+3. **Restart Domoticz** to load the plugin:
+   ```bash
+   sudo service domoticz.sh restart
+   ```
+
+---
+
+## ⚙️ Configuration
+
+After installation, add the plugin in Domoticz:
+
+1. Go to **Setup** → **Hardware**
+2. Add new hardware with type **ZonneDimmer Integration**
+3. Configure the following parameters:
+
+   | Parameter | Description | Required |
+   |-----------|-------------|----------|
+   | **Email** | Your ZonneDimmer account email | Yes |
+   | **Password** | Your ZonneDimmer account password | Yes |
+   | **Device ID** | Your ZonneDimmer device ID (UUID format) | Yes |
+   | **Update Interval** | How often to fetch live data (in seconds) | Yes (default: 60) |
+   | **Debug Level** | Logging verbosity level | No |
+
+4. Click **Add**
+
+---
+
+## 🔍 Finding Your Device ID
+
+To find your ZonneDimmer device ID:
+
+1. Log in to [app.zonnedimmer.nl](https://app.zonnedimmer.nl)
+2. Open your browser's Developer Tools (F12)
+3. Go to the Network tab
+4. Refresh the page
+5. Look for API calls to URLs like:
+   ```
+   https://app.zonnedimmer.nl/api/v1/graphs/live/zonnedimmers/[YOUR-DEVICE-ID]
+   ```
+6. Copy the UUID (format: `019de428-2b96-71bb-9be0-879ae5dd6269`)
+
+---
+
+## 📊 Devices Created
+
+The plugin creates the following devices in Domoticz:
+
+1. **Dimming Enable** (Switch)
+   - Turn dimming on or off
+   - When ON, the inverter can be dimmed based on price threshold
+
+2. **Dim Price Threshold** (Dimmer/Slider)
+   - Set the electricity price threshold for dimming
+   - Scale: 0-100 maps to -0.50 to +0.50 EUR/kWh
+   - Position 50 = 0.00 EUR/kWh
+   - Below 50 = negative prices (you pay to deliver)
+   - Above 50 = positive prices
+
+3. **Solar Generation** (Usage sensor)
+   - Shows current solar power generation in Watts
+   - Updates automatically based on configured interval
+
+4. **Status** (Text sensor)
+   - Shows connection status and current state
+   - Displays error messages if connection fails
+
+---
+
+## 🎯 Usage
+
+### Basic Usage
+
+1. **Enable Dimming**:
+   - Switch the "Dimming Enable" device to ON
+
+2. **Set Price Threshold**:
+   - Adjust the "Dim Price Threshold" slider
+   - Example: Set to 40 (= -0.10 EUR/kWh) to dim when prices drop below -10 cents per kWh
+
+3. **Monitor**:
+   - Check "Solar Generation" for current power output
+   - Check "Status" for connection state
+
+### Price Threshold Examples
+
+| Slider Position | EUR/kWh | Description |
+|----------------|---------|-------------|
+| 0 | -0.50 | Dim only when prices are extremely negative |
+| 25 | -0.25 | Dim when prices drop below -25 cents |
+| 40 | -0.10 | Dim when prices drop below -10 cents |
+| 50 | 0.00 | Dim when prices become zero or negative |
+| 60 | +0.10 | Dim when prices are below 10 cents |
+| 75 | +0.25 | Dim when prices are below 25 cents |
+| 100 | +0.50 | Always allow dimming (prices below 50 cents) |
+
+---
+
+## 🔧 API Endpoints Used
+
+The plugin uses the following ZonneDimmer API endpoints:
+
+- `POST /login` - Authentication with CSRF token
+- `GET /api/v1/graphs/live/zonnedimmers/{id}` - Live power data
+- `GET /api/v1/graphs/prices/zonnedimmers/{id}` - Price data  
+- `POST /dashboard/settings` - Update dimming settings (form-based)
+
+**Note**: The settings endpoint uses web form submission with CSRF token protection, not a REST API. The plugin handles this automatically by:
+1. Logging in and storing session cookies
+2. Fetching the settings page to get CSRF token
+3. Submitting the form with proper authentication
+
+---
+
+## 🐛 Troubleshooting
+
+### Plugin doesn't show up in hardware list
+- Make sure plugin.py is executable: `chmod +x plugin.py`
+- Restart Domoticz completely
+- Check Domoticz logs for Python errors
+
+### "Login failed" or authentication errors
+- Verify your email and password are correct
+- Check if you can log in to app.zonnedimmer.nl
+- The ZonneDimmer API may require CSRF token handling for web login
+
+### "No device ID" warning
+- Make sure you've entered your Device ID in the hardware configuration
+- Follow the steps in "Finding Your Device ID" section above
+
+### No data updates
+- Check your Update Interval setting
+- Verify your Device ID is correct
+- Check Domoticz logs for error messages
+- Enable Debug logging to see detailed API communication
+
+### Settings changes not applying
+- The settings API endpoint may need to be confirmed
+- Check debug logs for HTTP error codes
+- Verify your bearer token is valid
+
+---
+
+## 📝 Important Notes
+
+### Authentication
+The ZonneDimmer API uses Bearer token authentication. The current implementation attempts to use API endpoints directly. If web-based login flow is required (with CSRF tokens), you may need to:
+
+1. Manually obtain a bearer token from your browser's developer tools
+2. Configure the plugin to use that token
+3. Or implement full web login flow with session/CSRF handling
+
+### API Endpoint Confirmation
+Some API endpoints (especially the settings update endpoint) may need to be confirmed against the actual ZonneDimmer API. If settings updates don't work:
+
+1. Enable debug logging
+2. Check the actual API endpoints in your browser's network tab
+3. Update the plugin.py accordingly
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! If you find issues or have improvements:
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
+
+---
+
+## 📄 License
+
+This plugin is provided as-is for use with Domoticz and ZonneDimmer integration.
+
+---
+
+## 🙏 Credits
+
+- [Domoticz](https://www.domoticz.com) - Home automation system
+- [ZonneDimmer](https://www.zonnedimmer.nl) - Solar inverter dimming solution
+
+---
+
+## 📮 Support
+
+For issues and questions:
+- Check the [Issues](https://github.com/your-username/Domoticz-ZonneDimmer-Plugin/issues) page
+- Review Domoticz logs with debug enabled
+- Consult ZonneDimmer documentation
 
