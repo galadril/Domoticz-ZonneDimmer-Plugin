@@ -274,22 +274,59 @@ class BasePlugin:
             req.add_header('Connection', 'keep-alive')
             response = self.opener.open(req, timeout=10)
             Domoticz.Log(f"Dashboard loaded: HTTP {response.status}")
+
+            # Check response headers for bearer token
+            Domoticz.Debug("Checking response headers for bearer token...")
+            headers = response.info()
+            for header_name, header_value in headers.items():
+                Domoticz.Debug(f"  Header: {header_name} = {header_value[:100] if len(str(header_value)) > 100 else header_value}")
+                if 'authorization' in header_name.lower() or 'bearer' in str(header_value).lower():
+                    Domoticz.Log(f"Found auth header: {header_name} = {header_value}")
+
             dashboard_html = decompress_response(response.read())
             Domoticz.Debug(f"Dashboard HTML size: {len(dashboard_html)} bytes")
 
-            # Try to extract bearer token from JavaScript or meta tags
-            # Pattern: Bearer tokens are typically in format: number|string
-            token_match = re.search(r'Bearer\s+([\d]+\|[\w]+)', dashboard_html)
-            if token_match:
-                self.bearer_token = token_match.group(1)
-                Domoticz.Log(f"Bearer token obtained: {self.bearer_token[:20]}...")
-                Domoticz.Log(f"Bearer token length: {len(self.bearer_token)} characters")
-            else:
+            # Try multiple patterns to extract bearer token from HTML
+            token_patterns = [
+                r'localStorage\.setItem\(["\']token["\']\s*,\s*["\']([^"\']+)["\']',  # localStorage.setItem("token", "123|abc")
+                r'Bearer\s+([\d]+\|[\w]+)',  # Original pattern: Bearer 123|abc
+                r'bearer["\s:]+([0-9]+\|[a-zA-Z0-9]+)',  # bearer: "123|abc" or bearer":"123|abc"
+                r'Authorization["\s:]+Bearer\s+([0-9]+\|[a-zA-Z0-9]+)',  # Authorization: Bearer 123|abc
+                r'"token"["\s:]+([0-9]+\|[a-zA-Z0-9]+)',  # "token":"123|abc"
+                r'api[_-]?token["\s:]+([0-9]+\|[a-zA-Z0-9]+)',  # api_token or api-token
+            ]
+
+            for pattern in token_patterns:
+                token_match = re.search(pattern, dashboard_html, re.IGNORECASE)
+                if token_match:
+                    self.bearer_token = token_match.group(1)
+                    Domoticz.Log(f"Bearer token obtained using pattern '{pattern}': {self.bearer_token[:20]}...")
+                    Domoticz.Log(f"Bearer token length: {len(self.bearer_token)} characters")
+                    break
+
+            if not self.bearer_token:
                 # Bearer token might be set via API call, store session for now
                 Domoticz.Log("Bearer token not found in page, will use session authentication")
                 Domoticz.Debug("Searching for 'Bearer' in dashboard HTML...")
-                if 'bearer' in dashboard_html.lower():
-                    Domoticz.Debug("Found 'bearer' text but pattern didn't match")
+                bearer_lower = dashboard_html.lower()
+                if 'bearer' in bearer_lower:
+                    # Find all occurrences and log context
+                    index = 0
+                    occurrences = 0
+                    while True:
+                        index = bearer_lower.find('bearer', index)
+                        if index == -1:
+                            break
+                        occurrences += 1
+                        # Log 100 chars before and after
+                        start = max(0, index - 50)
+                        end = min(len(dashboard_html), index + 100)
+                        context = dashboard_html[start:end].replace('\n', ' ').replace('\r', '')
+                        Domoticz.Debug(f"Bearer occurrence #{occurrences} at pos {index}: ...{context}...")
+                        index += 6  # Move past 'bearer'
+                        if occurrences >= 5:  # Limit to first 5 occurrences
+                            break
+                    Domoticz.Debug(f"Found 'bearer' text {occurrences}+ times but no pattern matched")
                 else:
                     Domoticz.Debug("No 'bearer' text found in dashboard HTML")
 
