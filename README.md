@@ -93,6 +93,13 @@ The plugin creates the following devices in Domoticz:
    - Shows connection status and current state
    - Displays error messages if connection fails
 
+5. **Curtailment Percentage** (Dimmer/Slider)
+   - Set the minimum curtailment/dimming percentage
+   - Scale: 0-100 directly maps to 0-100%
+   - Position 0 = No minimum curtailment
+   - Position 100 = Maximum curtailment (100%)
+   - Controls how much the inverter should be dimmed when conditions are met
+
 ---
 
 ## 🎯 Usage
@@ -106,7 +113,12 @@ The plugin creates the following devices in Domoticz:
    - Adjust the "Dim Price Threshold" slider
    - Example: Set to 40 (= -0.10 EUR/kWh) to dim when prices drop below -10 cents per kWh
 
-3. **Monitor**:
+3. **Set Curtailment Percentage** (Optional):
+   - Adjust the "Curtailment Percentage" slider
+   - Example: Set to 50 to dim the inverter by at least 50% when dimming is active
+   - Leave at 0 for automatic/default curtailment
+
+4. **Monitor**:
    - Check "Solar Generation" for current power output
    - Check "Status" for connection state
 
@@ -122,6 +134,18 @@ The plugin creates the following devices in Domoticz:
 | 75 | +0.25 | Dim when prices are below 25 cents |
 | 100 | +0.50 | Always allow dimming (prices below 50 cents) |
 
+### Curtailment Percentage Examples
+
+| Slider Position | Curtailment | Description |
+|----------------|-------------|-------------|
+| 0 | None | No minimum curtailment (automatic) |
+| 25 | 25% | Reduce output to 75% of maximum |
+| 50 | 50% | Reduce output to 50% of maximum |
+| 75 | 75% | Reduce output to 25% of maximum |
+| 100 | 100% | Turn off inverter completely |
+
+**Note:** The curtailment percentage sets the *minimum* reduction when dimming is active. ZonneDimmer may apply more curtailment based on market conditions.
+
 ---
 
 ## 🔧 API Endpoints Used
@@ -132,6 +156,12 @@ The plugin uses the following ZonneDimmer API endpoints:
 - `GET /api/v1/graphs/live/zonnedimmers/{id}` - Live power data
 - `GET /api/v1/graphs/prices/zonnedimmers/{id}` - Price data  
 - `POST /dashboard/settings` - Update dimming settings (form-based)
+
+**Settings Form Parameters:**
+- `_token` - CSRF token (obtained from settings page)
+- `dynamic_contract` - Enable/disable dynamic pricing (0 or 1)
+- `min_negative_price_cts` - Price threshold in cents (e.g., -5 for -0.05 EUR/kWh)
+- `curtailment_min_perc` - Minimum curtailment percentage (0-100)
 
 **Note**: The settings endpoint uses web form submission with CSRF token protection, not a REST API. The plugin handles this automatically by:
 1. Logging in and storing session cookies
