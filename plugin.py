@@ -164,10 +164,10 @@ class BasePlugin:
             self.heartbeat_counter = 0
 
             # Ensure we're logged in
-            if not self.bearer_token:
+            if not self.bearer_token and not self.session_cookie:
                 self.login()
 
-            if self.bearer_token and self.device_id:
+            if (self.bearer_token or self.session_cookie) and self.device_id:
                 # Update live data
                 self.update_live_data()
 
@@ -292,14 +292,19 @@ class BasePlugin:
             Domoticz.Error(f"HTTP Error during login: {e.code} - {e.reason}")
             Domoticz.Error(f"Failed URL: {e.url}")
             try:
-                error_body = e.read().decode('utf-8')
+                error_body = decompress_response(e.read())
                 if len(error_body) < 500:
                     Domoticz.Error(f"Error response: {error_body}")
                 else:
                     Domoticz.Error(f"Error response (first 500 chars): {error_body[:500]}...")
             except:
                 Domoticz.Error("Could not read error response body")
-            UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Login failed: {e.code}")
+
+            if e.code == 429:
+                Domoticz.Log("Rate limited - will retry on next heartbeat cycle (wait 20 seconds)")
+                UpdateDevice(self.UNIT_STATUS_TEXT, 0, "Rate limited - waiting")
+            else:
+                UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Login failed: {e.code}")
         except Exception as e:
             Domoticz.Error(f"Login failed with exception: {str(e)}")
             Domoticz.Error(f"Exception type: {type(e).__name__}")
@@ -378,7 +383,7 @@ class BasePlugin:
         - min_negative_price_cts: price threshold in cents (e.g., -5 for -0.05 EUR)
         - curtailment_min_perc: curtailment percentage (0-100)
         """
-        if not self.bearer_token:
+        if not self.bearer_token and not self.session_cookie:
             Domoticz.Log("Cannot update settings: Not logged in")
             return
 
