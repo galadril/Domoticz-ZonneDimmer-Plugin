@@ -368,6 +368,33 @@ class BasePlugin:
                         Domoticz.Debug(f"HTML snippet (chars 0-500): {dashboard_html[:500]}")
                         Domoticz.Debug(f"HTML snippet (chars 1000-1500): {dashboard_html[1000:1500]}")
 
+            # If no bearer token found in HTML, try to get it from user info endpoint
+            if not self.bearer_token:
+                Domoticz.Log("Trying to get bearer token from user API endpoint...")
+                try:
+                    user_url = "https://app.zonnedimmer.nl/api/user"
+                    req = urllib.request.Request(user_url)
+                    req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+                    req.add_header('Accept', 'application/json')
+                    req.add_header('X-Requested-With', 'XMLHttpRequest')
+                    req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
+
+                    response = self.opener.open(req, timeout=10)
+                    user_data = json.loads(decompress_response(response.read()))
+                    Domoticz.Debug(f"User API response: {str(user_data)[:200]}")
+
+                    # Check if token is in the response
+                    if 'token' in user_data:
+                        self.bearer_token = user_data['token']
+                        Domoticz.Log(f"Bearer token obtained from user API: {self.bearer_token[:20]}...")
+                    elif 'access_token' in user_data:
+                        self.bearer_token = user_data['access_token']
+                        Domoticz.Log(f"Bearer token obtained from user API: {self.bearer_token[:20]}...")
+                    else:
+                        Domoticz.Debug("No token in user API response")
+                except Exception as e:
+                    Domoticz.Debug(f"Could not fetch token from user API: {str(e)}")
+
             Domoticz.Log("Login successful!")
             self.login_retry_counter = 0  # Reset retry counter on successful login
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, "Connected")
