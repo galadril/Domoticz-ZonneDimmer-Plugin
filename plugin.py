@@ -362,10 +362,15 @@ class BasePlugin:
             data = urllib.parse.urlencode(form_data).encode('utf-8')
 
             req = urllib.request.Request(url, data=data, method='POST')
-            req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
             req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
-            req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard/settings')
+            req.add_header('Accept-Language', 'en-GB,en;q=0.9')
+            req.add_header('Accept-Encoding', 'gzip, deflate, br')
+            req.add_header('Content-Type', 'application/x-www-form-urlencoded')
             req.add_header('Origin', 'https://app.zonnedimmer.nl')
+            req.add_header('Connection', 'keep-alive')
+            req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard/settings')
+            req.add_header('Upgrade-Insecure-Requests', '1')
 
             # Use cookie-based authentication (session)
             if hasattr(self, 'session_cookie') and self.session_cookie:
@@ -394,7 +399,12 @@ class BasePlugin:
             url = "https://app.zonnedimmer.nl/dashboard/settings"
 
             req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
             req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+            req.add_header('Accept-Language', 'en-GB,en;q=0.9')
+            req.add_header('Accept-Encoding', 'gzip, deflate, br')
+            req.add_header('Connection', 'keep-alive')
+            req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
 
             if hasattr(self, 'session_cookie') and self.session_cookie:
                 req.add_header('Cookie', self.session_cookie)
