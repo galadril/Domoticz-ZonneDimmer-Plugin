@@ -61,6 +61,7 @@ class BasePlugin:
         self.update_interval = 60
         self.bearer_token = None
         self.session_cookie = None
+        self.opener = None
         self.dimming_enabled = False
         self.dim_price = 0.0
         self.curtailment_perc = 0
@@ -82,13 +83,20 @@ class BasePlugin:
         self.device_id = Parameters["Mode1"]
         self.update_interval = int(Parameters.get("Mode2", "60"))
 
+        # Log configuration
+        Domoticz.Log(f"Configuration:")
+        Domoticz.Log(f"  Email: {self.email}")
+        Domoticz.Log(f"  Device ID: {self.device_id if self.device_id else 'NOT SET'}")
+        Domoticz.Log(f"  Update interval: {self.update_interval} seconds")
+
         # Validate parameters
         if not self.email or not self.password:
             Domoticz.Error("Email and Password are required!")
             return
 
         if not self.device_id:
-            Domoticz.Log("Device ID not set. You need to configure it after login.")
+            Domoticz.Error("Device ID not set! Plugin will not fetch data.")
+            Domoticz.Error("Please set Device ID in hardware configuration: 019de428-2b96-71bb-9be0-879ae5dd6269")
 
         # Create devices if they don't exist
         if self.UNIT_DIMMING_SWITCH not in Devices:
@@ -187,7 +195,7 @@ class BasePlugin:
 
             # Create cookie jar to handle cookies
             cookie_jar = http.cookiejar.CookieJar()
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+            self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
 
             # Get login page
             req = urllib.request.Request(login_page_url)
@@ -197,7 +205,7 @@ class BasePlugin:
             req.add_header('Accept-Encoding', 'gzip, deflate')
             req.add_header('Connection', 'keep-alive')
             req.add_header('Upgrade-Insecure-Requests', '1')
-            response = opener.open(req, timeout=10)
+            response = self.opener.open(req, timeout=10)
             Domoticz.Log(f"Login page loaded: HTTP {response.status}")
 
             # Read and decompress response
@@ -236,7 +244,7 @@ class BasePlugin:
             req.add_header('Referer', login_page_url)
             req.add_header('Upgrade-Insecure-Requests', '1')
 
-            response = opener.open(req, timeout=10)
+            response = self.opener.open(req, timeout=10)
             Domoticz.Log(f"Login POST response: HTTP {response.status}")
             Domoticz.Log(f"Login redirect to: {response.geturl()}")
 
@@ -264,7 +272,7 @@ class BasePlugin:
             req.add_header('Accept-Language', 'en-GB,en;q=0.9')
             req.add_header('Accept-Encoding', 'gzip, deflate')
             req.add_header('Connection', 'keep-alive')
-            response = opener.open(req, timeout=10)
+            response = self.opener.open(req, timeout=10)
             Domoticz.Log(f"Dashboard loaded: HTTP {response.status}")
             dashboard_html = decompress_response(response.read())
             Domoticz.Debug(f"Dashboard HTML size: {len(dashboard_html)} bytes")
@@ -342,7 +350,13 @@ class BasePlugin:
             if self.session_cookie:
                 req.add_header('Cookie', self.session_cookie)
 
-            with urllib.request.urlopen(req, timeout=10) as response:
+            # Use opener with cookies if available
+            if self.opener:
+                response = self.opener.open(req, timeout=10)
+            else:
+                response = urllib.request.urlopen(req, timeout=10)
+
+            with response:
                 Domoticz.Debug(f"Live data API response: HTTP {response.status}")
                 response_text = decompress_response(response.read())
                 Domoticz.Debug(f"Live data response size: {len(response_text)} bytes")
@@ -433,7 +447,13 @@ class BasePlugin:
             if hasattr(self, 'session_cookie') and self.session_cookie:
                 req.add_header('Cookie', self.session_cookie)
 
-            with urllib.request.urlopen(req, timeout=10) as response:
+            # Use opener with cookies
+            if self.opener:
+                response = self.opener.open(req, timeout=10)
+            else:
+                response = urllib.request.urlopen(req, timeout=10)
+
+            with response:
                 Domoticz.Log(f"Settings update response: HTTP {response.status}")
                 Domoticz.Log(f"Settings updated successfully:")
                 Domoticz.Log(f"  Dynamic contract: {'Enabled' if enabled else 'Disabled'}")
@@ -482,7 +502,13 @@ class BasePlugin:
             if hasattr(self, 'session_cookie') and self.session_cookie:
                 req.add_header('Cookie', self.session_cookie)
 
-            with urllib.request.urlopen(req, timeout=10) as response:
+            # Use opener with cookies
+            if self.opener:
+                response = self.opener.open(req, timeout=10)
+            else:
+                response = urllib.request.urlopen(req, timeout=10)
+
+            with response:
                 Domoticz.Debug(f"Settings page response: HTTP {response.status}")
                 html = decompress_response(response.read())
                 Domoticz.Debug(f"Settings page HTML size: {len(html)} bytes")
