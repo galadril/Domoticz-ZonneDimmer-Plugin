@@ -35,6 +35,15 @@ import urllib.request
 import urllib.error
 import re
 import http.cookiejar
+import gzip
+
+def decompress_response(response_data):
+    """Decompress response data if it's gzip compressed"""
+    # Check if gzip compressed (magic number 0x1f 0x8b)
+    if len(response_data) >= 2 and response_data[:2] == b'\x1f\x8b':
+        return gzip.decompress(response_data).decode('utf-8')
+    else:
+        return response_data.decode('utf-8')
 
 class BasePlugin:
 
@@ -190,7 +199,9 @@ class BasePlugin:
             req.add_header('Upgrade-Insecure-Requests', '1')
             response = opener.open(req, timeout=10)
             Domoticz.Log(f"Login page loaded: HTTP {response.status}")
-            html = response.read().decode('utf-8')
+
+            # Read and decompress response
+            html = decompress_response(response.read())
             Domoticz.Debug(f"Login page HTML size: {len(html)} bytes")
 
             # Extract CSRF token
@@ -218,7 +229,7 @@ class BasePlugin:
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
             req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
             req.add_header('Accept-Language', 'en-GB,en;q=0.9')
-            req.add_header('Accept-Encoding', 'gzip, deflate, br')
+            req.add_header('Accept-Encoding', 'gzip, deflate')
             req.add_header('Content-Type', 'application/x-www-form-urlencoded')
             req.add_header('Origin', 'https://app.zonnedimmer.nl')
             req.add_header('Connection', 'keep-alive')
@@ -255,7 +266,7 @@ class BasePlugin:
             req.add_header('Connection', 'keep-alive')
             response = opener.open(req, timeout=10)
             Domoticz.Log(f"Dashboard loaded: HTTP {response.status}")
-            dashboard_html = response.read().decode('utf-8')
+            dashboard_html = decompress_response(response.read())
             Domoticz.Debug(f"Dashboard HTML size: {len(dashboard_html)} bytes")
 
             # Try to extract bearer token from JavaScript or meta tags
@@ -328,7 +339,7 @@ class BasePlugin:
 
             with urllib.request.urlopen(req, timeout=10) as response:
                 Domoticz.Debug(f"Live data API response: HTTP {response.status}")
-                response_text = response.read().decode('utf-8')
+                response_text = decompress_response(response.read())
                 Domoticz.Debug(f"Live data response size: {len(response_text)} bytes")
                 data = json.loads(response_text)
 
@@ -468,7 +479,7 @@ class BasePlugin:
 
             with urllib.request.urlopen(req, timeout=10) as response:
                 Domoticz.Debug(f"Settings page response: HTTP {response.status}")
-                html = response.read().decode('utf-8')
+                html = decompress_response(response.read())
                 Domoticz.Debug(f"Settings page HTML size: {len(html)} bytes")
 
                 # Extract CSRF token from HTML
