@@ -1,5 +1,5 @@
 """
-<plugin key="ZonneDimmer" name="ZonneDimmer Integration" author="Your Name" version="1.0.0" wikilink="https://www.zonnedimmer.nl" externallink="https://github.com/your-repo/Domoticz-ZonneDimmer-Plugin">
+<plugin key="ZonneDimmer" name="ZonneDimmer Integration" author="galadril" version="1.1.0" wikilink="https://www.zonnedimmer.nl" externallink="https://github.com/galadril/Domoticz-ZonneDimmer-Plugin">
     <description>
         <h2>ZonneDimmer Integration Plugin</h2><br/>
         This plugin integrates Domoticz with ZonneDimmer to control your solar inverter dimming functionality.<br/>
@@ -7,6 +7,7 @@
         Features:<br/>
         - Enable/Disable dimming with a switch device<br/>
         - Set price threshold for dimming with a dimmer slider<br/>
+        - Set curtailment percentage (how much to dim) with a dimmer slider<br/>
         - Monitor live power generation and consumption<br/>
     </description>
     <params>
@@ -42,6 +43,7 @@ class BasePlugin:
     UNIT_PRICE_DIMMER = 2
     UNIT_LIVE_POWER = 3
     UNIT_STATUS_TEXT = 4
+    UNIT_CURTAILMENT_DIMMER = 5
 
     def __init__(self):
         self.email = ""
@@ -52,6 +54,7 @@ class BasePlugin:
         self.session_cookie = None
         self.dimming_enabled = False
         self.dim_price = 0.0
+        self.curtailment_perc = 0
         self.heartbeat_counter = 0
         return
 
@@ -95,6 +98,10 @@ class BasePlugin:
             Domoticz.Device(Name="Status", Unit=self.UNIT_STATUS_TEXT, TypeName="Text", Used=1).Create()
             Domoticz.Log("Status Text device created.")
 
+        if self.UNIT_CURTAILMENT_DIMMER not in Devices:
+            Domoticz.Device(Name="Curtailment Percentage", Unit=self.UNIT_CURTAILMENT_DIMMER, Type=244, Subtype=73, Switchtype=7, Image=15).Create()
+            Domoticz.Log("Curtailment Dimmer device created.")
+
         # Set heartbeat
         Domoticz.Heartbeat(20)
 
@@ -114,12 +121,12 @@ class BasePlugin:
             # Dimming enable/disable switch
             if Command == "On":
                 self.dimming_enabled = True
-                self.update_dimming_settings(True, self.dim_price)
+                self.update_dimming_settings(True, self.dim_price, self.curtailment_perc)
                 Devices[Unit].Update(nValue=1, sValue="On")
                 Domoticz.Log("Dimming enabled")
             elif Command == "Off":
                 self.dimming_enabled = False
-                self.update_dimming_settings(False, self.dim_price)
+                self.update_dimming_settings(False, self.dim_price, self.curtailment_perc)
                 Devices[Unit].Update(nValue=0, sValue="Off")
                 Domoticz.Log("Dimming disabled")
 
@@ -127,9 +134,16 @@ class BasePlugin:
             # Price threshold dimmer (0-100 maps to -0.50 to +0.50 EUR/kWh)
             # This gives a range of -50 to +50 cents
             self.dim_price = (Level - 50) / 100.0  # Maps 0-100 to -0.50 to +0.50
-            self.update_dimming_settings(self.dimming_enabled, self.dim_price)
+            self.update_dimming_settings(self.dimming_enabled, self.dim_price, self.curtailment_perc)
             Devices[Unit].Update(nValue=2, sValue=str(Level))
             Domoticz.Log(f"Dim price threshold set to: {self.dim_price:.3f} EUR/kWh")
+
+        elif Unit == self.UNIT_CURTAILMENT_DIMMER:
+            # Curtailment percentage dimmer (0-100 directly maps to 0-100%)
+            self.curtailment_perc = Level
+            self.update_dimming_settings(self.dimming_enabled, self.dim_price, self.curtailment_perc)
+            Devices[Unit].Update(nValue=2, sValue=str(Level))
+            Domoticz.Log(f"Curtailment percentage set to: {self.curtailment_perc}%")
 
     def onHeartbeat(self):
         Domoticz.Debug("onHeartbeat called")
@@ -168,6 +182,12 @@ class BasePlugin:
 
             # Get login page
             req = urllib.request.Request(login_page_url)
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+            req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+            req.add_header('Accept-Language', 'en-GB,en;q=0.9')
+            req.add_header('Accept-Encoding', 'gzip, deflate, br')
+            req.add_header('Connection', 'keep-alive')
+            req.add_header('Upgrade-Insecure-Requests', '1')
             response = opener.open(req, timeout=10)
             html = response.read().decode('utf-8')
 
@@ -193,8 +213,15 @@ class BasePlugin:
 
             data = urllib.parse.urlencode(form_data).encode('utf-8')
             req = urllib.request.Request(login_page_url, data=data, method='POST')
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+            req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+            req.add_header('Accept-Language', 'en-GB,en;q=0.9')
+            req.add_header('Accept-Encoding', 'gzip, deflate, br')
             req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+            req.add_header('Origin', 'https://app.zonnedimmer.nl')
+            req.add_header('Connection', 'keep-alive')
             req.add_header('Referer', login_page_url)
+            req.add_header('Upgrade-Insecure-Requests', '1')
 
             response = opener.open(req, timeout=10)
 
@@ -213,6 +240,11 @@ class BasePlugin:
 
             dashboard_url = "https://app.zonnedimmer.nl/dashboard"
             req = urllib.request.Request(dashboard_url)
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+            req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+            req.add_header('Accept-Language', 'en-GB,en;q=0.9')
+            req.add_header('Accept-Encoding', 'gzip, deflate, br')
+            req.add_header('Connection', 'keep-alive')
             response = opener.open(req, timeout=10)
             dashboard_html = response.read().decode('utf-8')
 
@@ -250,8 +282,13 @@ class BasePlugin:
             url = f"https://app.zonnedimmer.nl/api/v1/graphs/live/zonnedimmers/{self.device_id}"
 
             req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
             req.add_header('Accept', 'application/json')
+            req.add_header('Accept-Language', 'en-GB,en;q=0.9')
+            req.add_header('Accept-Encoding', 'gzip, deflate, br')
             req.add_header('X-Requested-With', 'XMLHttpRequest')
+            req.add_header('Connection', 'keep-alive')
+            req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
 
             # Use bearer token if available, otherwise use session cookie
             if self.bearer_token:
@@ -279,7 +316,7 @@ class BasePlugin:
         except Exception as e:
             Domoticz.Error(f"Error updating live data: {str(e)}")
 
-    def update_dimming_settings(self, enabled, price):
+    def update_dimming_settings(self, enabled, price, curtailment_perc=0):
         """Update dimming settings on ZonneDimmer
 
         Based on the actual API call:
@@ -287,13 +324,13 @@ class BasePlugin:
         - _token: CSRF token (needed for web forms)
         - dynamic_contract: 0 or 1 (for enabling dynamic pricing)
         - min_negative_price_cts: price threshold in cents (e.g., -5 for -0.05 EUR)
-        - curtailment_min_perc: curtailment percentage (optional)
+        - curtailment_min_perc: curtailment percentage (0-100)
         """
         if not self.bearer_token:
             Domoticz.Log("Cannot update settings: Not logged in")
             return
 
-        Domoticz.Debug(f"Updating dimming settings: enabled={enabled}, price={price}")
+        Domoticz.Debug(f"Updating dimming settings: enabled={enabled}, price={price}, curtailment={curtailment_perc}%")
 
         try:
             # Convert price from EUR to cents (e.g., -0.05 EUR -> -5 cents)
@@ -319,7 +356,7 @@ class BasePlugin:
                 '_token': csrf_token,
                 'dynamic_contract': '1' if enabled else '0',
                 'min_negative_price_cts': str(price_cents),
-                'curtailment_min_perc': ''  # Optional, leave empty
+                'curtailment_min_perc': str(curtailment_perc) if curtailment_perc > 0 else ''
             }
 
             data = urllib.parse.urlencode(form_data).encode('utf-8')
@@ -338,6 +375,8 @@ class BasePlugin:
                 Domoticz.Log(f"Settings updated successfully")
                 Domoticz.Log(f"  Dynamic contract: {'Enabled' if enabled else 'Disabled'}")
                 Domoticz.Log(f"  Price threshold: {price:.3f} EUR/kWh ({price_cents} cents)")
+                if curtailment_perc > 0:
+                    Domoticz.Log(f"  Curtailment: {curtailment_perc}%")
                 UpdateDevice(self.UNIT_STATUS_TEXT, 0, "Settings updated")
 
         except urllib.error.HTTPError as e:
