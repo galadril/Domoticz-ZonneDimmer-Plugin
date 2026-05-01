@@ -66,6 +66,8 @@ class BasePlugin:
         self.dim_price = 0.0
         self.curtailment_perc = 0
         self.heartbeat_counter = 0
+        self.login_retry_counter = 0
+        self.auth_failed_counter = 0
         return
 
     def onStart(self):
@@ -287,9 +289,10 @@ class BasePlugin:
             Domoticz.Debug(f"Dashboard HTML size: {len(dashboard_html)} bytes")
 
             # Try multiple patterns to extract bearer token from HTML
+            # Priority: localStorage.setItem is the most reliable method used by the actual site
             token_patterns = [
-                r'localStorage\.setItem\(["\']token["\']\s*,\s*["\']([^"\']+)["\']',  # localStorage.setItem("token", "123|abc")
-                r'Bearer\s+([\d]+\|[\w]+)',  # Original pattern: Bearer 123|abc
+                r'localStorage\.setItem\(["\']token["\']\s*,\s*["\']([0-9]+\|[a-zA-Z0-9]+)["\']',  # localStorage.setItem("token", '123|abc')
+                r'Bearer\s+([\d]+\|[\w]+)',  # Bearer 123|abc
                 r'bearer["\s:]+([0-9]+\|[a-zA-Z0-9]+)',  # bearer: "123|abc" or bearer":"123|abc"
                 r'Authorization["\s:]+Bearer\s+([0-9]+\|[a-zA-Z0-9]+)',  # Authorization: Bearer 123|abc
                 r'"token"["\s:]+([0-9]+\|[a-zA-Z0-9]+)',  # "token":"123|abc"
@@ -302,6 +305,7 @@ class BasePlugin:
                     self.bearer_token = token_match.group(1)
                     Domoticz.Log(f"Bearer token obtained using pattern '{pattern}': {self.bearer_token[:20]}...")
                     Domoticz.Log(f"Bearer token length: {len(self.bearer_token)} characters")
+                    self.auth_failed_counter = 0  # Reset auth failure counter on successful token extraction
                     break
 
             if not self.bearer_token:
@@ -331,6 +335,7 @@ class BasePlugin:
                     Domoticz.Debug("No 'bearer' text found in dashboard HTML")
 
             Domoticz.Log("Login successful!")
+            self.login_retry_counter = 0  # Reset retry counter on successful login
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, "Connected")
 
         except urllib.error.HTTPError as e:
@@ -414,10 +419,15 @@ class BasePlugin:
             Domoticz.Error(f"HTTP Error updating live data: {e.code} - {e.reason}")
             Domoticz.Error(f"API URL: {url}")
             if e.code == 401:
-                Domoticz.Log("Authentication expired, will re-login on next cycle")
-                self.bearer_token = None
-                self.session_cookie = None
-                self.login()
+                self.auth_failed_counter += 1
+                Domoticz.Log(f"Authentication failed (attempt {self.auth_failed_counter}), will re-login on next cycle")
+                # Only clear tokens after multiple failures to avoid rate limiting
+                if self.auth_failed_counter >= 2:
+                    Domoticz.Log("Multiple auth failures, clearing tokens and waiting for next heartbeat cycle")
+                    self.bearer_token = None
+                    self.session_cookie = None
+                else:
+                    Domoticz.Log("Keeping tokens for retry on next cycle")
         except Exception as e:
             Domoticz.Error(f"Error updating live data: {str(e)}")
             Domoticz.Error(f"Exception type: {type(e).__name__}")
