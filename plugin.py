@@ -273,6 +273,12 @@ class BasePlugin:
             Domoticz.Log(f"Login POST response: HTTP {response.status}")
             Domoticz.Log(f"Login redirect to: {response.geturl()}")
 
+            # Read the response body immediately — this IS the /dashboard HTML after the 302 redirect.
+            # The token is injected via Laravel session flash data which is only present on this
+            # first visit. A subsequent explicit GET to /dashboard will NOT have the token.
+            login_dashboard_html = decompress_response(response.read())
+            Domoticz.Debug(f"Login redirect HTML size: {len(login_dashboard_html)} bytes")
+
             # Step 3: Store session cookies and refresh XSRF token if updated
             cookie_list = []
             for cookie in cookie_jar:
@@ -318,29 +324,11 @@ class BasePlugin:
             except Exception as e:
                 Domoticz.Debug(f"REST API login attempt failed: {str(e)}")
 
-            # Step 4b: Try to get bearer token from dashboard HTML
-            # After login, we can access API endpoints
-            Domoticz.Log("Getting API bearer token from dashboard...")
-
-            dashboard_url = "https://app.zonnedimmer.nl/dashboard"
-            req = urllib.request.Request(dashboard_url)
-            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
-            req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
-            req.add_header('Accept-Language', 'en-GB,en;q=0.9')
-            req.add_header('Accept-Encoding', 'gzip, deflate')
-            req.add_header('Connection', 'keep-alive')
-            response = self.opener.open(req, timeout=10)
-            Domoticz.Log(f"Dashboard loaded: HTTP {response.status}")
-
-            # Check response headers for bearer token
-            Domoticz.Debug("Checking response headers for bearer token...")
-            headers = response.info()
-            for header_name, header_value in headers.items():
-                Domoticz.Debug(f"  Header: {header_name} = {header_value[:100] if len(str(header_value)) > 100 else header_value}")
-                if 'authorization' in header_name.lower() or 'bearer' in str(header_value).lower():
-                    Domoticz.Log(f"Found auth header: {header_name} = {header_value}")
-
-            dashboard_html = decompress_response(response.read())
+            # Step 4b: Extract bearer token from the login redirect HTML (dashboard page).
+            # Use the already-read body — do NOT make a second GET to /dashboard as that
+            # would miss the token (Laravel flash data already consumed on the first visit).
+            Domoticz.Log("Extracting bearer token from login redirect HTML...")
+            dashboard_html = login_dashboard_html
             Domoticz.Debug(f"Dashboard HTML size: {len(dashboard_html)} bytes")
 
             # Try multiple patterns to extract bearer token from HTML
