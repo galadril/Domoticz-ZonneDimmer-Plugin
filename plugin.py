@@ -66,6 +66,8 @@ class BasePlugin:
         self.dimming_enabled = False
         self.dim_price = 0.0
         self.curtailment_perc = 0
+        self.energy_supplier_id = None
+        self.exclude_tax = "0"
         self.heartbeat_counter = 0
         self.login_retry_counter = 0
         self.auth_failed_counter = 0
@@ -142,27 +144,26 @@ class BasePlugin:
             if Command == "On":
                 self.dimming_enabled = True
                 self.update_dimming_settings(True, self.dim_price, self.curtailment_perc)
-                Devices[Unit].Update(nValue=1, sValue="On")
+                UpdateDevice(self.UNIT_DIMMING_SWITCH, 1, "On")
                 Domoticz.Log("Dimming enabled")
             elif Command == "Off":
                 self.dimming_enabled = False
                 self.update_dimming_settings(False, self.dim_price, self.curtailment_perc)
-                Devices[Unit].Update(nValue=0, sValue="Off")
+                UpdateDevice(self.UNIT_DIMMING_SWITCH, 0, "Off")
                 Domoticz.Log("Dimming disabled")
 
         elif Unit == self.UNIT_PRICE_DIMMER:
-            # Price threshold dimmer (0-100 maps to -0.50 to +0.50 EUR/kWh)
-            # This gives a range of -50 to +50 cents
-            self.dim_price = (Level - 50) / 100.0  # Maps 0-100 to -0.50 to +0.50
+            # Price threshold dimmer: Level 0-100 maps to -0.50 to +0.50 EUR/kWh
+            self.dim_price = (Level - 50) / 100.0
             self.update_dimming_settings(self.dimming_enabled, self.dim_price, self.curtailment_perc)
-            Devices[Unit].Update(nValue=2, sValue=str(Level))
-            Domoticz.Log(f"Dim price threshold set to: {self.dim_price:.3f} EUR/kWh")
+            UpdateDevice(self.UNIT_PRICE_DIMMER, 2, str(Level))
+            Domoticz.Log(f"Dim price threshold set to: {self.dim_price:.3f} EUR/kWh (Level {Level})")
 
         elif Unit == self.UNIT_CURTAILMENT_DIMMER:
-            # Curtailment percentage dimmer (0-100 directly maps to 0-100%)
+            # Curtailment percentage dimmer: Level 0-100 directly maps to 0-100%
             self.curtailment_perc = Level
             self.update_dimming_settings(self.dimming_enabled, self.dim_price, self.curtailment_perc)
-            Devices[Unit].Update(nValue=2, sValue=str(Level))
+            UpdateDevice(self.UNIT_CURTAILMENT_DIMMER, 2 if Level > 0 else 0, str(Level))
             Domoticz.Log(f"Curtailment percentage set to: {self.curtailment_perc}%")
 
     def onHeartbeat(self):
@@ -519,7 +520,19 @@ class BasePlugin:
                 if sel_opt:
                     curtailment = int(sel_opt.group(1))
 
-            Domoticz.Log(f"Current settings: enabled={enabled}, price={price_eur:.2f} EUR/kWh ({price_cents} cts), curtailment={curtailment}%")
+            # energy_supplier_id: <option value="16" selected>
+            supplier_block = re.search(r'name="energy_supplier_id".*?</select>', html, re.IGNORECASE | re.DOTALL)
+            if supplier_block:
+                sup_match = re.search(r'<option[^>]+value="([0-9]+)"[^>]*selected', supplier_block.group(), re.IGNORECASE)
+                if sup_match:
+                    self.energy_supplier_id = sup_match.group(1)
+
+            # exclude_tax: radio button with checked attribute
+            tax_match = re.search(r'name="exclude_tax"[^>]+value="([01])"[^>]*checked', html, re.IGNORECASE)
+            if tax_match:
+                self.exclude_tax = tax_match.group(1)
+
+            Domoticz.Log(f"Current settings: enabled={enabled}, price={price_eur:.2f} EUR/kWh ({price_cents} cts), curtailment={curtailment}%, supplier={self.energy_supplier_id}, exclude_tax={self.exclude_tax}")
 
             # Update internal state
             self.dimming_enabled = enabled
@@ -646,16 +659,22 @@ class BasePlugin:
                 Domoticz.Error("Could not obtain CSRF token for settings update")
                 return
 
-            # Prepare form data
-            # dynamic_contract: 1 = enabled, 0 = disabled
-            form_data = {
-                '_token': csrf_token,
-                'dynamic_contract': '1' if enabled else '0',
-                'min_negative_price_cts': str(price_cents),
-                'curtailment_min_perc': str(curtailment_perc) if curtailment_perc > 0 else ''
-            }
+            # Prepare form data — matches the browser POST exactly.
+            # dynamic_contract is sent twice: hidden=0 always, then checkbox=1 when enabled.
+            # energy_supplier_id and exclude_tax must be included to avoid the server resetting them.
+            form_pairs = [
+                ('_token', csrf_token),
+                ('dynamic_contract', '0'),           # hidden field (always)
+            ]
+            if enabled:
+                form_pairs.append(('dynamic_contract', '1'))   # checkbox (only when checked)
+            if self.energy_supplier_id:
+                form_pairs.append(('energy_supplier_id', self.energy_supplier_id))
+            form_pairs.append(('exclude_tax', self.exclude_tax))
+            form_pairs.append(('min_negative_price_cts', str(price_cents)))
+            form_pairs.append(('curtailment_min_perc', str(curtailment_perc) if curtailment_perc > 0 else ''))
 
-            data = urllib.parse.urlencode(form_data).encode('utf-8')
+            data = urllib.parse.urlencode(form_pairs).encode('utf-8')
 
             req = urllib.request.Request(url, data=data, method='POST')
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
