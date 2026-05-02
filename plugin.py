@@ -60,6 +60,7 @@ class BasePlugin:
         self.device_id = ""
         self.update_interval = 60
         self.bearer_token = None
+        self.xsrf_token = None
         self.session_cookie = None
         self.opener = None
         self.dimming_enabled = False
@@ -189,7 +190,6 @@ class BasePlugin:
             import http.cookiejar
             import re
 
-            # Step 1: Get login page to obtain CSRF token
             Domoticz.Log("Getting login page...")
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, "Logging in...")
 
@@ -198,6 +198,27 @@ class BasePlugin:
             # Create cookie jar to handle cookies
             cookie_jar = http.cookiejar.CookieJar()
             self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+
+            # Step 1: Get Sanctum CSRF cookie (sets XSRF-TOKEN cookie for SPA auth)
+            try:
+                Domoticz.Log("Fetching Sanctum CSRF cookie...")
+                sanctum_url = "https://app.zonnedimmer.nl/sanctum/csrf-cookie"
+                req = urllib.request.Request(sanctum_url)
+                req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+                req.add_header('Accept', 'application/json, text/plain, */*')
+                req.add_header('Referer', 'https://app.zonnedimmer.nl/')
+                self.opener.open(req, timeout=10)
+                for cookie in cookie_jar:
+                    if cookie.name == 'XSRF-TOKEN':
+                        self.xsrf_token = urllib.parse.unquote(cookie.value)
+                        Domoticz.Log(f"XSRF-TOKEN obtained: {self.xsrf_token[:20]}...")
+                        break
+                if not self.xsrf_token:
+                    Domoticz.Debug("No XSRF-TOKEN cookie received from Sanctum endpoint")
+            except Exception as e:
+                Domoticz.Debug(f"Sanctum CSRF cookie fetch failed (non-fatal): {str(e)}")
+
+            # Step 2: Get login page to obtain CSRF token
 
             # Get login page
             req = urllib.request.Request(login_page_url)
@@ -245,12 +266,14 @@ class BasePlugin:
             req.add_header('Connection', 'keep-alive')
             req.add_header('Referer', login_page_url)
             req.add_header('Upgrade-Insecure-Requests', '1')
+            if self.xsrf_token:
+                req.add_header('X-XSRF-TOKEN', self.xsrf_token)
 
             response = self.opener.open(req, timeout=10)
             Domoticz.Log(f"Login POST response: HTTP {response.status}")
             Domoticz.Log(f"Login redirect to: {response.geturl()}")
 
-            # Step 3: Store session cookies
+            # Step 3: Store session cookies and refresh XSRF token if updated
             cookie_list = []
             for cookie in cookie_jar:
                 cookie_list.append(f"{cookie.name}={cookie.value}")
@@ -260,6 +283,9 @@ class BasePlugin:
                 Domoticz.Log(f"Session cookies stored: {len(cookie_list)} cookies, {len(self.session_cookie)} chars total")
                 for cookie in cookie_jar:
                     Domoticz.Debug(f"  Cookie: {cookie.name} = {cookie.value[:20]}... (expires: {cookie.expires or 'session'})")
+                    if cookie.name == 'XSRF-TOKEN':
+                        self.xsrf_token = urllib.parse.unquote(cookie.value)
+                        Domoticz.Log(f"XSRF-TOKEN refreshed after login: {self.xsrf_token[:20]}...")
             else:
                 Domoticz.Error("No session cookies received from login!")
 
@@ -470,9 +496,11 @@ class BasePlugin:
             req.add_header('Connection', 'keep-alive')
             req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
 
-            # Use bearer token if available, otherwise use session cookie
+            # Use bearer token if available, otherwise use Sanctum session auth
             if self.bearer_token:
                 req.add_header('Authorization', f'Bearer {self.bearer_token}')
+            elif self.xsrf_token:
+                req.add_header('X-XSRF-TOKEN', self.xsrf_token)
 
             if self.session_cookie:
                 req.add_header('Cookie', self.session_cookie)
@@ -510,6 +538,7 @@ class BasePlugin:
                 if self.auth_failed_counter >= 2:
                     Domoticz.Log("Multiple auth failures, clearing tokens and waiting for next heartbeat cycle")
                     self.bearer_token = None
+                    self.xsrf_token = None
                     self.session_cookie = None
                 else:
                     Domoticz.Log("Keeping tokens for retry on next cycle")
@@ -575,9 +604,11 @@ class BasePlugin:
             req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard/settings')
             req.add_header('Upgrade-Insecure-Requests', '1')
 
-            # Use cookie-based authentication (session)
-            if hasattr(self, 'session_cookie') and self.session_cookie:
+            # Cookie-based authentication (session)
+            if self.session_cookie:
                 req.add_header('Cookie', self.session_cookie)
+            if self.xsrf_token:
+                req.add_header('X-XSRF-TOKEN', self.xsrf_token)
 
             # Use opener with cookies
             if self.opener:
@@ -608,6 +639,7 @@ class BasePlugin:
             if e.code == 401 or e.code == 419:  # 419 = CSRF token mismatch
                 Domoticz.Error("Authentication or CSRF token error. Will re-login.")
                 self.bearer_token = None
+                self.xsrf_token = None
                 self.session_cookie = None
                 self.login()
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Settings failed: {e.code}")
@@ -631,8 +663,10 @@ class BasePlugin:
             req.add_header('Connection', 'keep-alive')
             req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
 
-            if hasattr(self, 'session_cookie') and self.session_cookie:
+            if self.session_cookie:
                 req.add_header('Cookie', self.session_cookie)
+            if self.xsrf_token:
+                req.add_header('X-XSRF-TOKEN', self.xsrf_token)
 
             # Use opener with cookies
             if self.opener:
