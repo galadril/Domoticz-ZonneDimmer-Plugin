@@ -237,10 +237,8 @@ This plugin is provided as-is for use with Domoticz and ZonneDimmer integration.
 
 ---
 
-## 📮 Support
+## 💝 Donation
 
-For issues and questions:
-- Check the [Issues](https://github.com/your-username/Domoticz-ZonneDimmer-Plugin/issues) page
-- Review Domoticz logs with debug enabled
-- Consult ZonneDimmer documentation
-
+If you like to say thanks, you could always buy me a cup of coffee (/beer)!   
+(Thanks!)  
+[![PayPal donate button](https://img.shields.io/badge/paypal-donate-yellow.svg)](https://www.paypal.me/markheinis)
