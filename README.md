@@ -78,12 +78,10 @@ The plugin creates the following devices in Domoticz:
    - Turn dimming on or off
    - When ON, the inverter can be dimmed based on price threshold
 
-2. **Dim Price Threshold** (Dimmer/Slider)
-   - Set the electricity price threshold for dimming
-   - Scale: 0-100 maps to -0.50 to +0.50 EUR/kWh
-   - Position 50 = 0.00 EUR/kWh
-   - Below 50 = negative prices (you pay to deliver)
-   - Above 50 = positive prices
+2. **Dim Price Threshold** (Setpoint)
+   - Set the electricity price threshold for dimming, directly in EUR/kWh
+   - Example: set to `-0.05` to dim when price drops below -5 cents/kWh
+   - Range: -0.50 to +0.50 EUR/kWh
 
 3. **Solar Generation** (Usage sensor)
    - Shows current solar power generation in Watts
@@ -124,15 +122,13 @@ The plugin creates the following devices in Domoticz:
 
 ### Price Threshold Examples
 
-| Slider Position | EUR/kWh | Description |
-|----------------|---------|-------------|
-| 0 | -0.50 | Dim only when prices are extremely negative |
-| 25 | -0.25 | Dim when prices drop below -25 cents |
-| 40 | -0.10 | Dim when prices drop below -10 cents |
-| 50 | 0.00 | Dim when prices become zero or negative |
-| 60 | +0.10 | Dim when prices are below 10 cents |
-| 75 | +0.25 | Dim when prices are below 25 cents |
-| 100 | +0.50 | Always allow dimming (prices below 50 cents) |
+| Setpoint Value | Description |
+|---------------|-------------|
+| -0.50 | Dim only when prices are extremely negative |
+| -0.25 | Dim when prices drop below -25 cents/kWh |
+| -0.10 | Dim when prices drop below -10 cents/kWh |
+|  0.00 | Dim when prices become zero or negative |
+| +0.10 | Dim when prices are below 10 cents/kWh |
 
 ### Curtailment Percentage Examples
 

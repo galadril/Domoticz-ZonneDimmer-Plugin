@@ -108,9 +108,13 @@ class BasePlugin:
             Domoticz.Device(Name="Dimming Enable", Unit=self.UNIT_DIMMING_SWITCH, TypeName="Switch", Image=9).Create()
             Domoticz.Log("Dimming Switch device created.")
 
+        # Replace old dimmer (Type 244) with Setpoint (Type 242) if needed
+        if self.UNIT_PRICE_DIMMER in Devices and Devices[self.UNIT_PRICE_DIMMER].Type != 242:
+            Devices[self.UNIT_PRICE_DIMMER].Delete()
+            Domoticz.Log("Price Dimmer replaced with Setpoint device.")
         if self.UNIT_PRICE_DIMMER not in Devices:
-            Domoticz.Device(Name="Dim Price Threshold", Unit=self.UNIT_PRICE_DIMMER, Type=244, Subtype=73, Switchtype=7, Image=15).Create()
-            Domoticz.Log("Price Dimmer device created.")
+            Domoticz.Device(Name="Dim Price Threshold", Unit=self.UNIT_PRICE_DIMMER, Type=242, Subtype=1, Used=1).Create()
+            Domoticz.Log("Price Setpoint device created.")
 
         if self.UNIT_LIVE_POWER not in Devices:
             Domoticz.Device(Name="Solar Generation", Unit=self.UNIT_LIVE_POWER, TypeName="Usage", Used=1).Create()
@@ -153,11 +157,11 @@ class BasePlugin:
                 Domoticz.Log("Dimming disabled")
 
         elif Unit == self.UNIT_PRICE_DIMMER:
-            # Price threshold dimmer: Level 0-100 maps to -0.50 to +0.50 EUR/kWh
-            self.dim_price = (Level - 50) / 100.0
+            # Price setpoint: Level IS the EUR/kWh value directly (e.g. -0.05)
+            self.dim_price = float(Level)
             self.update_dimming_settings(self.dimming_enabled, self.dim_price, self.curtailment_perc)
-            UpdateDevice(self.UNIT_PRICE_DIMMER, 2, str(Level))
-            Domoticz.Log(f"Dim price threshold set to: {self.dim_price:.3f} EUR/kWh (Level {Level})")
+            UpdateDevice(self.UNIT_PRICE_DIMMER, 0, f"{self.dim_price:.2f}")
+            Domoticz.Log(f"Dim price threshold set to: {self.dim_price:.2f} EUR/kWh")
 
         elif Unit == self.UNIT_CURTAILMENT_DIMMER:
             # Curtailment percentage dimmer: Level 0-100 directly maps to 0-100%
@@ -542,10 +546,8 @@ class BasePlugin:
             # Sync Domoticz switch device: nValue 1=On, 0=Off
             UpdateDevice(self.UNIT_DIMMING_SWITCH, 1 if enabled else 0, "On" if enabled else "Off")
 
-            # Sync price dimmer: Level 0-100 maps to -0.50 to +0.50 EUR/kWh
-            # Inverse: Level = price_cents + 50, clamped to 0-100
-            price_level = max(0, min(100, price_cents + 50))
-            UpdateDevice(self.UNIT_PRICE_DIMMER, 2 if price_level > 0 else 0, str(price_level))
+            # Sync price setpoint: sValue is the actual EUR/kWh value (e.g. "-0.05")
+            UpdateDevice(self.UNIT_PRICE_DIMMER, 0, f"{price_eur:.2f}")
 
             # Sync curtailment dimmer: Level = curtailment percentage (0-100)
             UpdateDevice(self.UNIT_CURTAILMENT_DIMMER, 2 if curtailment > 0 else 0, str(curtailment))
