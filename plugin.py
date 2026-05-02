@@ -263,9 +263,38 @@ class BasePlugin:
             else:
                 Domoticz.Error("No session cookies received from login!")
 
-            # Step 4: Try to get bearer token from API
+            # Step 4a: Try REST API login to get token directly (JSON endpoint)
+            try:
+                Domoticz.Log("Trying REST API login for bearer token...")
+                api_login_url = "https://app.zonnedimmer.nl/api/login"
+                login_payload = json.dumps({"email": self.email, "password": self.password}).encode('utf-8')
+                req = urllib.request.Request(api_login_url, data=login_payload, method='POST')
+                req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+                req.add_header('Content-Type', 'application/json')
+                req.add_header('Accept', 'application/json')
+                req.add_header('X-Requested-With', 'XMLHttpRequest')
+                response = self.opener.open(req, timeout=10)
+                api_data = json.loads(decompress_response(response.read()))
+                Domoticz.Debug(f"REST API login response: {str(api_data)[:200]}")
+                for key in ('token', 'access_token', 'bearer_token', 'api_token'):
+                    if key in api_data:
+                        self.bearer_token = api_data[key]
+                        Domoticz.Log(f"Bearer token obtained from REST API login ({key}): {self.bearer_token[:20]}...")
+                        self.auth_failed_counter = 0
+                        break
+                if not self.bearer_token and 'data' in api_data and isinstance(api_data['data'], dict):
+                    for key in ('token', 'access_token'):
+                        if key in api_data['data']:
+                            self.bearer_token = api_data['data'][key]
+                            Domoticz.Log(f"Bearer token obtained from REST API login data.{key}: {self.bearer_token[:20]}...")
+                            self.auth_failed_counter = 0
+                            break
+            except Exception as e:
+                Domoticz.Debug(f"REST API login attempt failed: {str(e)}")
+
+            # Step 4b: Try to get bearer token from dashboard HTML
             # After login, we can access API endpoints
-            Domoticz.Log("Getting API bearer token...")
+            Domoticz.Log("Getting API bearer token from dashboard...")
 
             dashboard_url = "https://app.zonnedimmer.nl/dashboard"
             req = urllib.request.Request(dashboard_url)
@@ -289,15 +318,20 @@ class BasePlugin:
             Domoticz.Debug(f"Dashboard HTML size: {len(dashboard_html)} bytes")
 
             # Try multiple patterns to extract bearer token from HTML
-            # Priority: localStorage.setItem is the most reliable method used by the actual site
             token_patterns = [
-                r'localStorage\.setItem\s*\(\s*["\']token["\']\s*,\s*["\']([0-9]+\|[a-zA-Z0-9]+)["\']',  # localStorage.setItem("token", '123|abc')
-                r'localStorage\.setItem\s*\(\s*"token"\s*,\s*"([0-9]+\|[a-zA-Z0-9]+)"',  # localStorage.setItem("token", "123|abc")
-                r"localStorage\.setItem\s*\(\s*'token'\s*,\s*'([0-9]+\|[a-zA-Z0-9]+)'",  # localStorage.setItem('token', '123|abc')
-                r'["\']([0-9]{3,5}\|[a-zA-Z0-9]{30,})["\']',  # Generic: "7727|IapiP4AnkU8..." or '7727|IapiP4AnkU8...'
-                r'Bearer\s+([\d]+\|[\w]+)',  # Bearer 123|abc
-                r'bearer["\s:]+([0-9]+\|[a-zA-Z0-9]+)',  # bearer: "123|abc"
-                r'Authorization["\s:]+Bearer\s+([0-9]+\|[a-zA-Z0-9]+)',  # Authorization: Bearer 123|abc
+                # localStorage.setItem('token', '...') — any format, at least 10 chars
+                r'localStorage\.setItem\s*\(\s*["\']token["\']\s*,\s*["\']([^"\']{10,})["\']',
+                # window.token / window.apiToken / window.authToken
+                r'window\.(?:token|apiToken|authToken|bearerToken)\s*=\s*["\']([^"\']{10,})["\']',
+                # meta tag: <meta name="api-token" content="...">
+                r'<meta[^>]+name=["\'](?:api-token|bearer-token|token)["\'][^>]+content=["\']([^"\']{10,})["\']',
+                r'<meta[^>]+content=["\']([^"\']{10,})["\'][^>]+name=["\'](?:api-token|bearer-token|token)["\']',
+                # JSON: "token": "..." or "access_token": "..."
+                r'"(?:token|access_token|api_token)"\s*:\s*"([^"]{10,})"',
+                # Sanctum/Passport number|hash format
+                r'["\']([0-9]{1,6}\|[a-zA-Z0-9]{20,})["\']',
+                # Bearer header values in HTML
+                r'Bearer\s+([\w.|-]{10,})',
             ]
 
             for pattern in token_patterns:
@@ -338,8 +372,8 @@ class BasePlugin:
                             Domoticz.Debug(f"localStorage.setItem at pos {ls_index}:")
                             Domoticz.Debug(f"  Context: {context[:300]}")
 
-                            # Try to extract token from this section
-                            token_match = re.search(r'setItem\s*\(\s*["\']token["\']\s*,\s*["\']([0-9]+\|[a-zA-Z0-9]+)["\']', context, re.IGNORECASE)
+                            # Try to extract token from this section — any format >= 10 chars
+                            token_match = re.search(r'setItem\s*\(\s*["\']token["\']\s*,\s*["\']([^"\']{10,})["\']', context, re.IGNORECASE)
                             if token_match:
                                 self.bearer_token = token_match.group(1)
                                 Domoticz.Log(f"Found token in localStorage.setItem: {self.bearer_token[:20]}...")
@@ -349,51 +383,41 @@ class BasePlugin:
                         # Find next occurrence
                         ls_index = html_lower.find('localstorage', ls_index + 1)
 
-                # If still not found, try broader search for any token pattern
+                # If still not found, log snippets around all localStorage occurrences for diagnostics
                 if not self.bearer_token:
-                    Domoticz.Debug("Trying broader token search...")
-                    # Look for quoted strings that match token format
-                    token_pattern = r'["\']([0-9]{3,5}\|[a-zA-Z0-9]{30,})["\']'
-                    matches = re.findall(token_pattern, dashboard_html)
-                    if matches:
-                        Domoticz.Debug(f"Found {len(matches)} potential token(s) in HTML:")
-                        for i, match in enumerate(matches[:3]):  # Show first 3
-                            Domoticz.Debug(f"  Token candidate #{i+1}: {match[:20]}... (length: {len(match)})")
-                        # Use the first match
-                        self.bearer_token = matches[0]
-                        Domoticz.Log(f"Using first token candidate as bearer token: {self.bearer_token[:20]}...")
-                        self.auth_failed_counter = 0
-                    else:
-                        Domoticz.Debug("No token-like patterns (number|string) found in HTML")
-                        Domoticz.Debug(f"HTML snippet (chars 0-500): {dashboard_html[:500]}")
-                        Domoticz.Debug(f"HTML snippet (chars 1000-1500): {dashboard_html[1000:1500]}")
+                    Domoticz.Debug("No token found via localStorage search.")
+                    Domoticz.Debug(f"HTML snippet (chars 0-500): {dashboard_html[:500]}")
+                    Domoticz.Debug(f"HTML snippet (chars 1000-1500): {dashboard_html[1000:1500]}")
 
-            # If no bearer token found in HTML, try to get it from user info endpoint
+            # If no bearer token found in HTML, try several API endpoints
             if not self.bearer_token:
-                Domoticz.Log("Trying to get bearer token from user API endpoint...")
-                try:
-                    user_url = "https://app.zonnedimmer.nl/api/user"
-                    req = urllib.request.Request(user_url)
-                    req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
-                    req.add_header('Accept', 'application/json')
-                    req.add_header('X-Requested-With', 'XMLHttpRequest')
-                    req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
-
-                    response = self.opener.open(req, timeout=10)
-                    user_data = json.loads(decompress_response(response.read()))
-                    Domoticz.Debug(f"User API response: {str(user_data)[:200]}")
-
-                    # Check if token is in the response
-                    if 'token' in user_data:
-                        self.bearer_token = user_data['token']
-                        Domoticz.Log(f"Bearer token obtained from user API: {self.bearer_token[:20]}...")
-                    elif 'access_token' in user_data:
-                        self.bearer_token = user_data['access_token']
-                        Domoticz.Log(f"Bearer token obtained from user API: {self.bearer_token[:20]}...")
-                    else:
-                        Domoticz.Debug("No token in user API response")
-                except Exception as e:
-                    Domoticz.Debug(f"Could not fetch token from user API: {str(e)}")
+                api_token_endpoints = [
+                    "https://app.zonnedimmer.nl/api/user",
+                    "https://app.zonnedimmer.nl/api/v1/user",
+                    "https://app.zonnedimmer.nl/api/auth/me",
+                    "https://app.zonnedimmer.nl/api/me",
+                ]
+                for endpoint_url in api_token_endpoints:
+                    try:
+                        Domoticz.Log(f"Trying token endpoint: {endpoint_url}")
+                        req = urllib.request.Request(endpoint_url)
+                        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+                        req.add_header('Accept', 'application/json')
+                        req.add_header('X-Requested-With', 'XMLHttpRequest')
+                        req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
+                        response = self.opener.open(req, timeout=10)
+                        endpoint_data = json.loads(decompress_response(response.read()))
+                        Domoticz.Debug(f"Response from {endpoint_url}: {str(endpoint_data)[:200]}")
+                        for key in ('token', 'access_token', 'api_token', 'bearer_token'):
+                            if key in endpoint_data:
+                                self.bearer_token = endpoint_data[key]
+                                Domoticz.Log(f"Bearer token obtained from {endpoint_url} ({key}): {self.bearer_token[:20]}...")
+                                self.auth_failed_counter = 0
+                                break
+                        if self.bearer_token:
+                            break
+                    except Exception as e:
+                        Domoticz.Debug(f"Could not fetch token from {endpoint_url}: {str(e)}")
 
             Domoticz.Log("Login successful!")
             self.login_retry_counter = 0  # Reset retry counter on successful login
