@@ -445,6 +445,7 @@ class BasePlugin:
             Domoticz.Log("Login successful!")
             self.login_retry_counter = 0  # Reset retry counter on successful login
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, "Connected")
+            self.fetch_current_settings()
 
         except urllib.error.HTTPError as e:
             Domoticz.Error(f"HTTP Error during login: {e.code} - {e.reason}")
@@ -472,6 +473,72 @@ class BasePlugin:
                 if line.strip():
                     Domoticz.Error(f"  {line}")
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Login failed: {str(e)}")
+
+    def fetch_current_settings(self):
+        """Fetch current settings from ZonneDimmer and sync Domoticz devices to match."""
+        if not self.bearer_token and not self.session_cookie:
+            return
+
+        try:
+            url = "https://app.zonnedimmer.nl/dashboard/settings"
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+            req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+            req.add_header('Accept-Encoding', 'gzip, deflate')
+            req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
+            if self.bearer_token:
+                req.add_header('Authorization', f'Bearer {self.bearer_token}')
+            if self.session_cookie:
+                req.add_header('Cookie', self.session_cookie)
+
+            if self.opener:
+                response = self.opener.open(req, timeout=10)
+            else:
+                response = urllib.request.urlopen(req, timeout=10)
+
+            with response:
+                html = decompress_response(response.read())
+
+            # dynamic_contract: hidden=0 + checkbox value=1 checked → enabled when checkbox has 'checked'
+            dyn_match = re.search(
+                r'name="dynamic_contract"[^>]*value="1"[^>]*checked|'
+                r'name="dynamic_contract"[^>]*checked[^>]*value="1"',
+                html, re.IGNORECASE | re.DOTALL)
+            enabled = bool(dyn_match)
+
+            # min_negative_price_cts: <input ... name="min_negative_price_cts" ... value="-5" ...>
+            price_match = re.search(r'name="min_negative_price_cts"[^>]+value="([^"]+)"', html)
+            price_cents = int(price_match.group(1)) if price_match else 0
+            price_eur = price_cents / 100.0
+
+            # curtailment_min_perc: <option value="30" selected> — absent means empty (0%)
+            curt_block = re.search(r'name="curtailment_min_perc".*?</select>', html, re.IGNORECASE | re.DOTALL)
+            curtailment = 0
+            if curt_block:
+                sel_opt = re.search(r'<option[^>]+value="([0-9]+)"[^>]*selected', curt_block.group(), re.IGNORECASE)
+                if sel_opt:
+                    curtailment = int(sel_opt.group(1))
+
+            Domoticz.Log(f"Current settings: enabled={enabled}, price={price_eur:.2f} EUR/kWh ({price_cents} cts), curtailment={curtailment}%")
+
+            # Update internal state
+            self.dimming_enabled = enabled
+            self.dim_price = price_eur
+            self.curtailment_perc = curtailment
+
+            # Sync Domoticz switch device: nValue 1=On, 0=Off
+            UpdateDevice(self.UNIT_DIMMING_SWITCH, 1 if enabled else 0, "On" if enabled else "Off")
+
+            # Sync price dimmer: Level 0-100 maps to -0.50 to +0.50 EUR/kWh
+            # Inverse: Level = price_cents + 50, clamped to 0-100
+            price_level = max(0, min(100, price_cents + 50))
+            UpdateDevice(self.UNIT_PRICE_DIMMER, 2 if price_level > 0 else 0, str(price_level))
+
+            # Sync curtailment dimmer: Level = curtailment percentage (0-100)
+            UpdateDevice(self.UNIT_CURTAILMENT_DIMMER, 2 if curtailment > 0 else 0, str(curtailment))
+
+        except Exception as e:
+            Domoticz.Error(f"Error fetching current settings: {str(e)}")
 
     def update_live_data(self):
         """Fetch live power generation data"""
