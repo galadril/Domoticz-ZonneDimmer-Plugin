@@ -108,20 +108,23 @@ class BasePlugin:
             Domoticz.Device(Name="Dimming Enable", Unit=self.UNIT_DIMMING_SWITCH, TypeName="Switch", Image=9).Create()
             Domoticz.Log("Dimming Switch device created.")
 
-        # Replace old dimmer (Type 244) with Setpoint (Type 242) if needed
-        if self.UNIT_PRICE_DIMMER in Devices and Devices[self.UNIT_PRICE_DIMMER].Type != 242:
-            Devices[self.UNIT_PRICE_DIMMER].Delete()
-            Domoticz.Log("Price Dimmer replaced with Setpoint device.")
+        # Replace device if wrong type or missing step/unit options
+        price_opts = {"ValueStep": "0.1", "ValueMin": "-0.5", "ValueMax": "0.5", "ValueUnit": "\u20ac/kWh"}
+        if self.UNIT_PRICE_DIMMER in Devices:
+            d = Devices[self.UNIT_PRICE_DIMMER]
+            if d.Type != 242 or d.Options.get("ValueStep") != "0.1":
+                d.Delete()
+                Domoticz.Log("Price device recreated with step/unit options.")
         if self.UNIT_PRICE_DIMMER not in Devices:
-            Domoticz.Device(Name="Dim Price Threshold", Unit=self.UNIT_PRICE_DIMMER, Type=242, Subtype=1, Used=1).Create()
+            Domoticz.Device(Name="Dim Price Threshold", Unit=self.UNIT_PRICE_DIMMER, Type=242, Subtype=1, Used=0, Options=price_opts).Create()
             Domoticz.Log("Price Setpoint device created.")
 
         if self.UNIT_LIVE_POWER not in Devices:
-            Domoticz.Device(Name="Solar Generation", Unit=self.UNIT_LIVE_POWER, TypeName="Usage", Used=1).Create()
+            Domoticz.Device(Name="Solar Generation", Unit=self.UNIT_LIVE_POWER, TypeName="Usage", Used=0).Create()
             Domoticz.Log("Live Power device created.")
 
         if self.UNIT_STATUS_TEXT not in Devices:
-            Domoticz.Device(Name="Status", Unit=self.UNIT_STATUS_TEXT, TypeName="Text", Used=1).Create()
+            Domoticz.Device(Name="Status", Unit=self.UNIT_STATUS_TEXT, TypeName="Text", Used=0).Create()
             Domoticz.Log("Status Text device created.")
 
         if self.UNIT_CURTAILMENT_DIMMER not in Devices:
