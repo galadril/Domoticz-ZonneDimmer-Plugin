@@ -384,22 +384,24 @@ class BasePlugin:
                     Domoticz.Debug(f"First 1000 chars after <body>: {script_section[:500]}")
 
                 # Search for localStorage.setItem with token
-                if 'localstorage' in html_lower and 'setitem' in html_lower:
-                    # Find where they appear together
+                if 'localstorage' in html_lower:
+                    # Find ALL localStorage occurrences (not just those near setItem)
                     ls_index = html_lower.find('localstorage')
                     while ls_index != -1:
-                        # Get 400 chars around each occurrence
-                        start = max(0, ls_index - 100)
-                        end = min(len(dashboard_html), ls_index + 400)
+                        # Get 600 chars after each occurrence
+                        start = max(0, ls_index - 150)
+                        end = min(len(dashboard_html), ls_index + 600)
                         context = dashboard_html[start:end]
+                        # Replace newlines so Domoticz doesn't truncate log output
+                        context_flat = context.replace('\n', ' ').replace('\r', '')
 
-                        # Check if this section has both localStorage and a token pattern
+                        Domoticz.Debug(f"localStorage at pos {ls_index} (flat): {context_flat[:400]}")
+
                         if 'setitem' in context.lower():
-                            Domoticz.Debug(f"localStorage.setItem at pos {ls_index}:")
-                            Domoticz.Debug(f"  Context: {context[:300]}")
-
-                            # Try to extract token from this section — any format >= 10 chars
-                            token_match = re.search(r'setItem\s*\(\s*["\']token["\']\s*,\s*["\']([^"\']{10,})["\']', context, re.IGNORECASE)
+                            # Try to extract token — quoted string (single, double, or backtick)
+                            token_match = re.search(
+                                r'setItem\s*\(\s*["\']token["\']\s*,\s*["\'\`]([^"\'\`]{10,})["\'\`]',
+                                context, re.IGNORECASE)
                             if token_match:
                                 self.bearer_token = token_match.group(1)
                                 Domoticz.Log(f"Found token in localStorage.setItem: {self.bearer_token[:20]}...")
@@ -409,11 +411,18 @@ class BasePlugin:
                         # Find next occurrence
                         ls_index = html_lower.find('localstorage', ls_index + 1)
 
-                # If still not found, log snippets around all localStorage occurrences for diagnostics
+                # Also search for the Sanctum token format anywhere in the HTML
                 if not self.bearer_token:
-                    Domoticz.Debug("No token found via localStorage search.")
-                    Domoticz.Debug(f"HTML snippet (chars 0-500): {dashboard_html[:500]}")
-                    Domoticz.Debug(f"HTML snippet (chars 1000-1500): {dashboard_html[1000:1500]}")
+                    sanctum_match = re.search(r'["\'\`]([0-9]{1,6}\|[a-zA-Z0-9]{20,})["\'\`]', dashboard_html)
+                    if sanctum_match:
+                        self.bearer_token = sanctum_match.group(1)
+                        Domoticz.Log(f"Found Sanctum token pattern in HTML: {self.bearer_token[:20]}...")
+                        self.auth_failed_counter = 0
+
+                # If still not found, log end-of-HTML for diagnostics (token scripts injected near </body>)
+                if not self.bearer_token:
+                    Domoticz.Debug("No token found via localStorage/Sanctum search.")
+                    Domoticz.Debug(f"HTML end (last 1000 chars flat): {dashboard_html[-1000:].replace(chr(10), ' ').replace(chr(13), '')}")
 
             # If no bearer token found in HTML, try several API endpoints
             if not self.bearer_token:
