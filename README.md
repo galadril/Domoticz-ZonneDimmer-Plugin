@@ -81,7 +81,7 @@ The plugin creates the following devices in Domoticz:
 2. **Dim Price Threshold** (Setpoint)
    - Set the electricity price threshold for dimming, directly in EUR/kWh
    - Example: set to `-0.05` to dim when price drops below -5 cents/kWh
-   - Range: -0.50 to +0.50 EUR/kWh
+   - Range: -1.00 to +1.00 EUR/kWh, step 0.1
 
 3. **Solar Generation** (Usage sensor)
    - Shows current solar power generation in Watts

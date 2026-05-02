@@ -109,7 +109,7 @@ class BasePlugin:
             Domoticz.Log("Dimming Switch device created.")
 
         # Replace device if wrong type or missing step/unit options
-        price_opts = {"ValueStep": "0.1", "ValueMin": "-0.5", "ValueMax": "0.5", "ValueUnit": "\u20ac/kWh"}
+        price_opts = {"ValueStep": "0.1", "ValueMin": "-1.0", "ValueMax": "1.0", "ValueUnit": "\u20ac/kWh"}
         if self.UNIT_PRICE_DIMMER in Devices:
             d = Devices[self.UNIT_PRICE_DIMMER]
             if d.Type != 242 or d.Options.get("ValueStep") != "0.1":
