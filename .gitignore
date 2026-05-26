@@ -40,3 +40,4 @@ config.json
 # Test files
 test_output/
 *.log
+/.claude

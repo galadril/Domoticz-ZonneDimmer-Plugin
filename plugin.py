@@ -60,12 +60,14 @@ class BasePlugin:
         self.device_id = ""
         self.update_interval = 60
         self.bearer_token = None
+        self.xsrf_token = None
         self.session_cookie = None
         self.opener = None
-        self.cookie_jar = None
         self.dimming_enabled = False
         self.dim_price = 0.0
         self.curtailment_perc = 0
+        self.energy_supplier_id = None
+        self.exclude_tax = "0"
         self.heartbeat_counter = 0
         self.login_retry_counter = 0
         self.auth_failed_counter = 0
@@ -106,16 +108,23 @@ class BasePlugin:
             Domoticz.Device(Name="Dimming Enable", Unit=self.UNIT_DIMMING_SWITCH, TypeName="Switch", Image=9).Create()
             Domoticz.Log("Dimming Switch device created.")
 
+        # Replace device if wrong type or missing step/unit options
+        price_opts = {"ValueStep": "0.1", "ValueMin": "-1.0", "ValueMax": "1.0", "ValueUnit": "\u20ac/kWh"}
+        if self.UNIT_PRICE_DIMMER in Devices:
+            d = Devices[self.UNIT_PRICE_DIMMER]
+            if d.Type != 242 or d.Options.get("ValueStep") != "0.1":
+                d.Delete()
+                Domoticz.Log("Price device recreated with step/unit options.")
         if self.UNIT_PRICE_DIMMER not in Devices:
-            Domoticz.Device(Name="Dim Price Threshold", Unit=self.UNIT_PRICE_DIMMER, Type=244, Subtype=73, Switchtype=7, Image=15).Create()
-            Domoticz.Log("Price Dimmer device created.")
+            Domoticz.Device(Name="Dim Price Threshold", Unit=self.UNIT_PRICE_DIMMER, Type=242, Subtype=1, Used=0, Options=price_opts).Create()
+            Domoticz.Log("Price Setpoint device created.")
 
         if self.UNIT_LIVE_POWER not in Devices:
-            Domoticz.Device(Name="Solar Generation", Unit=self.UNIT_LIVE_POWER, TypeName="Usage", Used=1).Create()
+            Domoticz.Device(Name="Solar Generation", Unit=self.UNIT_LIVE_POWER, TypeName="Usage", Used=0).Create()
             Domoticz.Log("Live Power device created.")
 
         if self.UNIT_STATUS_TEXT not in Devices:
-            Domoticz.Device(Name="Status", Unit=self.UNIT_STATUS_TEXT, TypeName="Text", Used=1).Create()
+            Domoticz.Device(Name="Status", Unit=self.UNIT_STATUS_TEXT, TypeName="Text", Used=0).Create()
             Domoticz.Log("Status Text device created.")
 
         if self.UNIT_CURTAILMENT_DIMMER not in Devices:
@@ -142,27 +151,26 @@ class BasePlugin:
             if Command == "On":
                 self.dimming_enabled = True
                 self.update_dimming_settings(True, self.dim_price, self.curtailment_perc)
-                Devices[Unit].Update(nValue=1, sValue="On")
+                UpdateDevice(self.UNIT_DIMMING_SWITCH, 1, "On")
                 Domoticz.Log("Dimming enabled")
             elif Command == "Off":
                 self.dimming_enabled = False
                 self.update_dimming_settings(False, self.dim_price, self.curtailment_perc)
-                Devices[Unit].Update(nValue=0, sValue="Off")
+                UpdateDevice(self.UNIT_DIMMING_SWITCH, 0, "Off")
                 Domoticz.Log("Dimming disabled")
 
         elif Unit == self.UNIT_PRICE_DIMMER:
-            # Price threshold dimmer (0-100 maps to -0.50 to +0.50 EUR/kWh)
-            # This gives a range of -50 to +50 cents
-            self.dim_price = (Level - 50) / 100.0  # Maps 0-100 to -0.50 to +0.50
+            # Price setpoint: Level IS the EUR/kWh value directly (e.g. -0.05)
+            self.dim_price = float(Level)
             self.update_dimming_settings(self.dimming_enabled, self.dim_price, self.curtailment_perc)
-            Devices[Unit].Update(nValue=2, sValue=str(Level))
-            Domoticz.Log(f"Dim price threshold set to: {self.dim_price:.3f} EUR/kWh")
+            UpdateDevice(self.UNIT_PRICE_DIMMER, 0, f"{self.dim_price:.2f}")
+            Domoticz.Log(f"Dim price threshold set to: {self.dim_price:.2f} EUR/kWh")
 
         elif Unit == self.UNIT_CURTAILMENT_DIMMER:
-            # Curtailment percentage dimmer (0-100 directly maps to 0-100%)
+            # Curtailment percentage dimmer: Level 0-100 directly maps to 0-100%
             self.curtailment_perc = Level
             self.update_dimming_settings(self.dimming_enabled, self.dim_price, self.curtailment_perc)
-            Devices[Unit].Update(nValue=2, sValue=str(Level))
+            UpdateDevice(self.UNIT_CURTAILMENT_DIMMER, 2 if Level > 0 else 0, str(Level))
             Domoticz.Log(f"Curtailment percentage set to: {self.curtailment_perc}%")
 
     def onHeartbeat(self):
@@ -190,29 +198,35 @@ class BasePlugin:
             import http.cookiejar
             import re
 
-            # Step 1: Get login page to obtain CSRF token
             Domoticz.Log("Getting login page...")
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, "Logging in...")
 
             login_page_url = "https://app.zonnedimmer.nl/login"
 
             # Create cookie jar to handle cookies
-            self.cookie_jar = http.cookiejar.CookieJar()
-            cookie_jar = self.cookie_jar
+            cookie_jar = http.cookiejar.CookieJar()
             self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
 
-            # Fetch Sanctum CSRF cookie (required for SPA session auth)
-            Domoticz.Log("Fetching Sanctum CSRF cookie...")
+            # Step 1: Get Sanctum CSRF cookie (sets XSRF-TOKEN cookie for SPA auth)
             try:
-                csrf_req = urllib.request.Request("https://app.zonnedimmer.nl/sanctum/csrf-cookie")
-                csrf_req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36')
-                csrf_req.add_header('Accept', 'application/json, text/plain, */*')
-                csrf_req.add_header('Referer', 'https://app.zonnedimmer.nl/')
-                csrf_req.add_header('X-Requested-With', 'XMLHttpRequest')
-                self.opener.open(csrf_req, timeout=10)
-                Domoticz.Debug("Sanctum CSRF cookie fetched")
+                Domoticz.Log("Fetching Sanctum CSRF cookie...")
+                sanctum_url = "https://app.zonnedimmer.nl/sanctum/csrf-cookie"
+                req = urllib.request.Request(sanctum_url)
+                req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+                req.add_header('Accept', 'application/json, text/plain, */*')
+                req.add_header('Referer', 'https://app.zonnedimmer.nl/')
+                self.opener.open(req, timeout=10)
+                for cookie in cookie_jar:
+                    if cookie.name == 'XSRF-TOKEN':
+                        self.xsrf_token = urllib.parse.unquote(cookie.value)
+                        Domoticz.Log(f"XSRF-TOKEN obtained: {self.xsrf_token[:20]}...")
+                        break
+                if not self.xsrf_token:
+                    Domoticz.Debug("No XSRF-TOKEN cookie received from Sanctum endpoint")
             except Exception as e:
-                Domoticz.Debug(f"Could not fetch Sanctum CSRF cookie (non-fatal): {str(e)}")
+                Domoticz.Debug(f"Sanctum CSRF cookie fetch failed (non-fatal): {str(e)}")
+
+            # Step 2: Get login page to obtain CSRF token
 
             # Get login page
             req = urllib.request.Request(login_page_url)
@@ -260,16 +274,20 @@ class BasePlugin:
             req.add_header('Connection', 'keep-alive')
             req.add_header('Referer', login_page_url)
             req.add_header('Upgrade-Insecure-Requests', '1')
+            if self.xsrf_token:
+                req.add_header('X-XSRF-TOKEN', self.xsrf_token)
 
             response = self.opener.open(req, timeout=10)
             Domoticz.Log(f"Login POST response: HTTP {response.status}")
             Domoticz.Log(f"Login redirect to: {response.geturl()}")
 
-            # Read the dashboard HTML directly from the login redirect response
-            dashboard_html = decompress_response(response.read())
-            Domoticz.Log(f"Login redirect HTML size: {len(dashboard_html)} bytes")
+            # Read the response body immediately — this IS the /dashboard HTML after the 302 redirect.
+            # The token is injected via Laravel session flash data which is only present on this
+            # first visit. A subsequent explicit GET to /dashboard will NOT have the token.
+            login_dashboard_html = decompress_response(response.read())
+            Domoticz.Debug(f"Login redirect HTML size: {len(login_dashboard_html)} bytes")
 
-            # Step 3: Store session cookies
+            # Step 3: Store session cookies and refresh XSRF token if updated
             cookie_list = []
             for cookie in cookie_jar:
                 cookie_list.append(f"{cookie.name}={cookie.value}")
@@ -279,97 +297,163 @@ class BasePlugin:
                 Domoticz.Log(f"Session cookies stored: {len(cookie_list)} cookies, {len(self.session_cookie)} chars total")
                 for cookie in cookie_jar:
                     Domoticz.Debug(f"  Cookie: {cookie.name} = {cookie.value[:20]}... (expires: {cookie.expires or 'session'})")
+                    if cookie.name == 'XSRF-TOKEN':
+                        self.xsrf_token = urllib.parse.unquote(cookie.value)
+                        Domoticz.Log(f"XSRF-TOKEN refreshed after login: {self.xsrf_token[:20]}...")
             else:
                 Domoticz.Error("No session cookies received from login!")
 
-            # Step 4: Extract bearer token
-            # The dashboard JS fetches a token endpoint and stores data.access_token in localStorage.
-            # Find that endpoint URL in the JS and call it with our session cookies.
-            Domoticz.Log("Extracting bearer token from login redirect HTML...")
-            Domoticz.Log(f"Dashboard HTML size: {len(dashboard_html)} bytes")
+            # Step 4a: Try REST API login to get token directly (JSON endpoint)
+            try:
+                Domoticz.Log("Trying REST API login for bearer token...")
+                api_login_url = "https://app.zonnedimmer.nl/api/login"
+                login_payload = json.dumps({"email": self.email, "password": self.password}).encode('utf-8')
+                req = urllib.request.Request(api_login_url, data=login_payload, method='POST')
+                req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+                req.add_header('Content-Type', 'application/json')
+                req.add_header('Accept', 'application/json')
+                req.add_header('X-Requested-With', 'XMLHttpRequest')
+                response = self.opener.open(req, timeout=10)
+                api_data = json.loads(decompress_response(response.read()))
+                Domoticz.Debug(f"REST API login response: {str(api_data)[:200]}")
+                for key in ('token', 'access_token', 'bearer_token', 'api_token'):
+                    if key in api_data:
+                        self.bearer_token = api_data[key]
+                        Domoticz.Log(f"Bearer token obtained from REST API login ({key}): {self.bearer_token[:20]}...")
+                        self.auth_failed_counter = 0
+                        break
+                if not self.bearer_token and 'data' in api_data and isinstance(api_data['data'], dict):
+                    for key in ('token', 'access_token'):
+                        if key in api_data['data']:
+                            self.bearer_token = api_data['data'][key]
+                            Domoticz.Log(f"Bearer token obtained from REST API login data.{key}: {self.bearer_token[:20]}...")
+                            self.auth_failed_counter = 0
+                            break
+            except Exception as e:
+                Domoticz.Debug(f"REST API login attempt failed: {str(e)}")
 
-            # First: try to find a static token already embedded (legacy path)
+            # Step 4b: Extract bearer token from the login redirect HTML (dashboard page).
+            # Use the already-read body — do NOT make a second GET to /dashboard as that
+            # would miss the token (Laravel flash data already consumed on the first visit).
+            Domoticz.Log("Extracting bearer token from login redirect HTML...")
+            dashboard_html = login_dashboard_html
+            Domoticz.Debug(f"Dashboard HTML size: {len(dashboard_html)} bytes")
+
+            # Try multiple patterns to extract bearer token from HTML
             token_patterns = [
-                r'localStorage\.setItem\s*\(\s*["\']token["\']\s*,\s*["\']([0-9]+\|[a-zA-Z0-9]+)["\']',
-                r'["\']([0-9]{3,5}\|[a-zA-Z0-9]{30,})["\']',
-                r'Bearer\s+([\d]+\|[\w]+)',
+                # localStorage.setItem('token', '...') — any format, at least 10 chars
+                r'localStorage\.setItem\s*\(\s*["\']token["\']\s*,\s*["\']([^"\']{10,})["\']',
+                # window.token / window.apiToken / window.authToken
+                r'window\.(?:token|apiToken|authToken|bearerToken)\s*=\s*["\']([^"\']{10,})["\']',
+                # meta tag: <meta name="api-token" content="...">
+                r'<meta[^>]+name=["\'](?:api-token|bearer-token|token)["\'][^>]+content=["\']([^"\']{10,})["\']',
+                r'<meta[^>]+content=["\']([^"\']{10,})["\'][^>]+name=["\'](?:api-token|bearer-token|token)["\']',
+                # JSON: "token": "..." or "access_token": "..."
+                r'"(?:token|access_token|api_token)"\s*:\s*"([^"]{10,})"',
+                # Sanctum/Passport number|hash format
+                r'["\']([0-9]{1,6}\|[a-zA-Z0-9]{20,})["\']',
+                # Bearer header values in HTML
+                r'Bearer\s+([\w.|-]{10,})',
             ]
+
             for pattern in token_patterns:
                 token_match = re.search(pattern, dashboard_html, re.IGNORECASE)
                 if token_match:
                     self.bearer_token = token_match.group(1)
-                    Domoticz.Log(f"Bearer token found in HTML: {self.bearer_token[:20]}...")
-                    self.auth_failed_counter = 0
+                    Domoticz.Log(f"Bearer token obtained using pattern: {self.bearer_token[:20]}...")
+                    Domoticz.Log(f"Bearer token length: {len(self.bearer_token)} characters")
+                    self.auth_failed_counter = 0  # Reset auth failure counter on successful token extraction
                     break
 
-            # Second: find the token API endpoint URL from the JS and call it
             if not self.bearer_token:
-                Domoticz.Log("Bearer token not found in page, scanning JS for token endpoint URL...")
-                # Look for URL patterns near 'access_token' in the JS
-                # e.g.: url: '/api/v1/token'  or  fetch('/api/v1/token')  or  $.ajax({ url: '/api/token' ...
-                endpoint_patterns = [
-                    r"""url\s*:\s*['"](/api/[^'"]+)['"](?:[^}]*?)access_token""",
-                    r"""access_token(?:[^}]*?)url\s*:\s*['"](/api/[^'"]+)['"]""",
-                    r"""fetch\s*\(\s*['"](/api/[^'"]+)['"](?:[^)]*?)access_token""",
-                    r"""access_token(?:[^'"]*)fetch\s*\(\s*['"](/api/[^'"]+)['"]""",
-                    r"""['"](/api/[^'"]{3,60})['"]\s*[,)][^}]*access_token""",
-                    r"""access_token[^'"]*['"](/api/[^'"]{3,60})['"]""",
+                # Bearer token might be set via API call, store session for now
+                Domoticz.Log("Bearer token not found in page, will use session authentication")
+
+                # Search for the exact script tag that should contain the token
+                Domoticz.Debug("Searching for token in <script> tags...")
+                html_lower = dashboard_html.lower()
+
+                # Look for <script> tags in the HTML
+                script_start = html_lower.find('<body')
+                if script_start != -1:
+                    script_section = dashboard_html[script_start:script_start+1000]
+                    Domoticz.Debug(f"First 1000 chars after <body>: {script_section[:500]}")
+
+                # Search for localStorage.setItem with token
+                if 'localstorage' in html_lower:
+                    # Find ALL localStorage occurrences (not just those near setItem)
+                    ls_index = html_lower.find('localstorage')
+                    while ls_index != -1:
+                        # Get 600 chars after each occurrence
+                        start = max(0, ls_index - 150)
+                        end = min(len(dashboard_html), ls_index + 600)
+                        context = dashboard_html[start:end]
+                        # Replace newlines so Domoticz doesn't truncate log output
+                        context_flat = context.replace('\n', ' ').replace('\r', '')
+
+                        Domoticz.Debug(f"localStorage at pos {ls_index} (flat): {context_flat[:400]}")
+
+                        if 'setitem' in context.lower():
+                            # Try to extract token — quoted string (single, double, or backtick)
+                            token_match = re.search(
+                                r'setItem\s*\(\s*["\']token["\']\s*,\s*["\'\`]([^"\'\`]{10,})["\'\`]',
+                                context, re.IGNORECASE)
+                            if token_match:
+                                self.bearer_token = token_match.group(1)
+                                Domoticz.Log(f"Found token in localStorage.setItem: {self.bearer_token[:20]}...")
+                                self.auth_failed_counter = 0
+                                break
+
+                        # Find next occurrence
+                        ls_index = html_lower.find('localstorage', ls_index + 1)
+
+                # Also search for the Sanctum token format anywhere in the HTML
+                if not self.bearer_token:
+                    sanctum_match = re.search(r'["\'\`]([0-9]{1,6}\|[a-zA-Z0-9]{20,})["\'\`]', dashboard_html)
+                    if sanctum_match:
+                        self.bearer_token = sanctum_match.group(1)
+                        Domoticz.Log(f"Found Sanctum token pattern in HTML: {self.bearer_token[:20]}...")
+                        self.auth_failed_counter = 0
+
+                # If still not found, log end-of-HTML for diagnostics (token scripts injected near </body>)
+                if not self.bearer_token:
+                    Domoticz.Debug("No token found via localStorage/Sanctum search.")
+                    Domoticz.Debug(f"HTML end (last 1000 chars flat): {dashboard_html[-1000:].replace(chr(10), ' ').replace(chr(13), '')}")
+
+            # If no bearer token found in HTML, try several API endpoints
+            if not self.bearer_token:
+                api_token_endpoints = [
+                    "https://app.zonnedimmer.nl/api/user",
+                    "https://app.zonnedimmer.nl/api/v1/user",
+                    "https://app.zonnedimmer.nl/api/auth/me",
+                    "https://app.zonnedimmer.nl/api/me",
                 ]
-                token_api_path = None
-                for ep_pattern in endpoint_patterns:
-                    ep_match = re.search(ep_pattern, dashboard_html, re.IGNORECASE | re.DOTALL)
-                    if ep_match:
-                        token_api_path = ep_match.group(1)
-                        Domoticz.Log(f"Token endpoint found in JS: {token_api_path}")
-                        break
-
-                # Fallback: search near every 'access_token' occurrence for a /api/ URL
-                if not token_api_path:
-                    for m in re.finditer(r'access_token', dashboard_html, re.IGNORECASE):
-                        window = dashboard_html[max(0, m.start()-500):m.end()+500]
-                        url_match = re.search(r"""['"](/api/[^'"]{3,60})['"]""", window)
-                        if url_match:
-                            token_api_path = url_match.group(1)
-                            Domoticz.Log(f"Token endpoint near 'access_token': {token_api_path}")
-                            break
-
-                if token_api_path:
-                    token_api_url = f"https://app.zonnedimmer.nl{token_api_path}"
-                    Domoticz.Log(f"Calling token endpoint: {token_api_url}")
+                for endpoint_url in api_token_endpoints:
                     try:
-                        xsrf_token = self._get_xsrf_token()
-                        req = urllib.request.Request(token_api_url)
-                        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36')
+                        Domoticz.Log(f"Trying token endpoint: {endpoint_url}")
+                        req = urllib.request.Request(endpoint_url)
+                        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
                         req.add_header('Accept', 'application/json')
                         req.add_header('X-Requested-With', 'XMLHttpRequest')
                         req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
-                        if xsrf_token:
-                            req.add_header('X-XSRF-TOKEN', xsrf_token)
-                        resp = self.opener.open(req, timeout=10)
-                        resp_data = json.loads(decompress_response(resp.read()))
-                        Domoticz.Debug(f"Token endpoint response: {str(resp_data)[:200]}")
-                        token = None
-                        if isinstance(resp_data, dict):
-                            token = (resp_data.get('access_token') or resp_data.get('token')
-                                     or (resp_data.get('data') or {}).get('access_token')
-                                     or (resp_data.get('data') or {}).get('token'))
-                        if token:
-                            self.bearer_token = token
-                            Domoticz.Log(f"Bearer token obtained from token endpoint: {token[:20]}...")
-                            self.auth_failed_counter = 0
-                        else:
-                            Domoticz.Log(f"Token endpoint returned no token. Keys: {list(resp_data.keys()) if isinstance(resp_data, dict) else 'non-dict'}")
-                    except Exception as ex:
-                        Domoticz.Log(f"Token endpoint call failed: {str(ex)}")
-                else:
-                    Domoticz.Log("No token endpoint URL found in JS")
-
-            if not self.bearer_token:
-                Domoticz.Log("No bearer token obtained, will use session cookie authentication")
+                        response = self.opener.open(req, timeout=10)
+                        endpoint_data = json.loads(decompress_response(response.read()))
+                        Domoticz.Debug(f"Response from {endpoint_url}: {str(endpoint_data)[:200]}")
+                        for key in ('token', 'access_token', 'api_token', 'bearer_token'):
+                            if key in endpoint_data:
+                                self.bearer_token = endpoint_data[key]
+                                Domoticz.Log(f"Bearer token obtained from {endpoint_url} ({key}): {self.bearer_token[:20]}...")
+                                self.auth_failed_counter = 0
+                                break
+                        if self.bearer_token:
+                            break
+                    except Exception as e:
+                        Domoticz.Debug(f"Could not fetch token from {endpoint_url}: {str(e)}")
 
             Domoticz.Log("Login successful!")
             self.login_retry_counter = 0  # Reset retry counter on successful login
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, "Connected")
+            self.fetch_current_settings()
 
         except urllib.error.HTTPError as e:
             Domoticz.Error(f"HTTP Error during login: {e.code} - {e.reason}")
@@ -398,6 +482,82 @@ class BasePlugin:
                     Domoticz.Error(f"  {line}")
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Login failed: {str(e)}")
 
+    def fetch_current_settings(self):
+        """Fetch current settings from ZonneDimmer and sync Domoticz devices to match."""
+        if not self.bearer_token and not self.session_cookie:
+            return
+
+        try:
+            url = "https://app.zonnedimmer.nl/dashboard/settings"
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+            req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+            req.add_header('Accept-Encoding', 'gzip, deflate')
+            req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
+            if self.bearer_token:
+                req.add_header('Authorization', f'Bearer {self.bearer_token}')
+            if self.session_cookie:
+                req.add_header('Cookie', self.session_cookie)
+
+            if self.opener:
+                response = self.opener.open(req, timeout=10)
+            else:
+                response = urllib.request.urlopen(req, timeout=10)
+
+            with response:
+                html = decompress_response(response.read())
+
+            # dynamic_contract: hidden=0 + checkbox value=1 checked → enabled when checkbox has 'checked'
+            dyn_match = re.search(
+                r'name="dynamic_contract"[^>]*value="1"[^>]*checked|'
+                r'name="dynamic_contract"[^>]*checked[^>]*value="1"',
+                html, re.IGNORECASE | re.DOTALL)
+            enabled = bool(dyn_match)
+
+            # min_negative_price_cts: <input ... name="min_negative_price_cts" ... value="-5" ...>
+            price_match = re.search(r'name="min_negative_price_cts"[^>]+value="([^"]+)"', html)
+            price_cents = int(price_match.group(1)) if price_match else 0
+            price_eur = price_cents / 100.0
+
+            # curtailment_min_perc: <option value="30" selected> — absent means empty (0%)
+            curt_block = re.search(r'name="curtailment_min_perc".*?</select>', html, re.IGNORECASE | re.DOTALL)
+            curtailment = 0
+            if curt_block:
+                sel_opt = re.search(r'<option[^>]+value="([0-9]+)"[^>]*selected', curt_block.group(), re.IGNORECASE)
+                if sel_opt:
+                    curtailment = int(sel_opt.group(1))
+
+            # energy_supplier_id: <option value="16" selected>
+            supplier_block = re.search(r'name="energy_supplier_id".*?</select>', html, re.IGNORECASE | re.DOTALL)
+            if supplier_block:
+                sup_match = re.search(r'<option[^>]+value="([0-9]+)"[^>]*selected', supplier_block.group(), re.IGNORECASE)
+                if sup_match:
+                    self.energy_supplier_id = sup_match.group(1)
+
+            # exclude_tax: radio button with checked attribute
+            tax_match = re.search(r'name="exclude_tax"[^>]+value="([01])"[^>]*checked', html, re.IGNORECASE)
+            if tax_match:
+                self.exclude_tax = tax_match.group(1)
+
+            Domoticz.Log(f"Current settings: enabled={enabled}, price={price_eur:.2f} EUR/kWh ({price_cents} cts), curtailment={curtailment}%, supplier={self.energy_supplier_id}, exclude_tax={self.exclude_tax}")
+
+            # Update internal state
+            self.dimming_enabled = enabled
+            self.dim_price = price_eur
+            self.curtailment_perc = curtailment
+
+            # Sync Domoticz switch device: nValue 1=On, 0=Off
+            UpdateDevice(self.UNIT_DIMMING_SWITCH, 1 if enabled else 0, "On" if enabled else "Off")
+
+            # Sync price setpoint: sValue is the actual EUR/kWh value (e.g. "-0.05")
+            UpdateDevice(self.UNIT_PRICE_DIMMER, 0, f"{price_eur:.2f}")
+
+            # Sync curtailment dimmer: Level = curtailment percentage (0-100)
+            UpdateDevice(self.UNIT_CURTAILMENT_DIMMER, 2 if curtailment > 0 else 0, str(curtailment))
+
+        except Exception as e:
+            Domoticz.Error(f"Error fetching current settings: {str(e)}")
+
     def update_live_data(self):
         """Fetch live power generation data"""
         if not self.bearer_token and not self.session_cookie:
@@ -410,25 +570,22 @@ class BasePlugin:
             url = f"https://app.zonnedimmer.nl/api/v1/graphs/live/zonnedimmers/{self.device_id}"
 
             req = urllib.request.Request(url)
-            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36')
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
             req.add_header('Accept', 'application/json')
-            req.add_header('Accept-Language', 'nl-NL,nl;q=0.9,en-GB;q=0.8,en;q=0.7')
+            req.add_header('Accept-Language', 'en-GB,en;q=0.9')
             req.add_header('Accept-Encoding', 'gzip, deflate')
             req.add_header('X-Requested-With', 'XMLHttpRequest')
             req.add_header('Connection', 'keep-alive')
             req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
 
-            # Use bearer token if available, otherwise use session cookie
+            # Use bearer token if available, otherwise use Sanctum session auth
             if self.bearer_token:
                 req.add_header('Authorization', f'Bearer {self.bearer_token}')
+            elif self.xsrf_token:
+                req.add_header('X-XSRF-TOKEN', self.xsrf_token)
 
             if self.session_cookie:
                 req.add_header('Cookie', self.session_cookie)
-
-            # Add XSRF token for Sanctum SPA session auth
-            xsrf_token = self._get_xsrf_token()
-            if xsrf_token and not self.bearer_token:
-                req.add_header('X-XSRF-TOKEN', xsrf_token)
 
             # Use opener with cookies if available
             if self.opener:
@@ -463,6 +620,7 @@ class BasePlugin:
                 if self.auth_failed_counter >= 2:
                     Domoticz.Log("Multiple auth failures, clearing tokens and waiting for next heartbeat cycle")
                     self.bearer_token = None
+                    self.xsrf_token = None
                     self.session_cookie = None
                 else:
                     Domoticz.Log("Keeping tokens for retry on next cycle")
@@ -506,16 +664,22 @@ class BasePlugin:
                 Domoticz.Error("Could not obtain CSRF token for settings update")
                 return
 
-            # Prepare form data
-            # dynamic_contract: 1 = enabled, 0 = disabled
-            form_data = {
-                '_token': csrf_token,
-                'dynamic_contract': '1' if enabled else '0',
-                'min_negative_price_cts': str(price_cents),
-                'curtailment_min_perc': str(curtailment_perc) if curtailment_perc > 0 else ''
-            }
+            # Prepare form data — matches the browser POST exactly.
+            # dynamic_contract is sent twice: hidden=0 always, then checkbox=1 when enabled.
+            # energy_supplier_id and exclude_tax must be included to avoid the server resetting them.
+            form_pairs = [
+                ('_token', csrf_token),
+                ('dynamic_contract', '0'),           # hidden field (always)
+            ]
+            if enabled:
+                form_pairs.append(('dynamic_contract', '1'))   # checkbox (only when checked)
+            if self.energy_supplier_id:
+                form_pairs.append(('energy_supplier_id', self.energy_supplier_id))
+            form_pairs.append(('exclude_tax', self.exclude_tax))
+            form_pairs.append(('min_negative_price_cts', str(price_cents)))
+            form_pairs.append(('curtailment_min_perc', str(curtailment_perc) if curtailment_perc > 0 else ''))
 
-            data = urllib.parse.urlencode(form_data).encode('utf-8')
+            data = urllib.parse.urlencode(form_pairs).encode('utf-8')
 
             req = urllib.request.Request(url, data=data, method='POST')
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
@@ -528,9 +692,11 @@ class BasePlugin:
             req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard/settings')
             req.add_header('Upgrade-Insecure-Requests', '1')
 
-            # Use cookie-based authentication (session)
-            if hasattr(self, 'session_cookie') and self.session_cookie:
+            # Cookie-based authentication (session)
+            if self.session_cookie:
                 req.add_header('Cookie', self.session_cookie)
+            if self.xsrf_token:
+                req.add_header('X-XSRF-TOKEN', self.xsrf_token)
 
             # Use opener with cookies
             if self.opener:
@@ -561,6 +727,7 @@ class BasePlugin:
             if e.code == 401 or e.code == 419:  # 419 = CSRF token mismatch
                 Domoticz.Error("Authentication or CSRF token error. Will re-login.")
                 self.bearer_token = None
+                self.xsrf_token = None
                 self.session_cookie = None
                 self.login()
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Settings failed: {e.code}")
@@ -570,15 +737,6 @@ class BasePlugin:
             import traceback
             Domoticz.Debug(traceback.format_exc())
             UpdateDevice(self.UNIT_STATUS_TEXT, 0, f"Settings error")
-
-    def _get_xsrf_token(self):
-        """Extract URL-decoded XSRF-TOKEN value from cookie jar for use as X-XSRF-TOKEN header"""
-        if not hasattr(self, 'cookie_jar') or self.cookie_jar is None:
-            return None
-        for cookie in self.cookie_jar:
-            if cookie.name == 'XSRF-TOKEN':
-                return urllib.parse.unquote(cookie.value)
-        return None
 
     def get_csrf_token(self):
         """Get CSRF token from settings page"""
@@ -593,8 +751,10 @@ class BasePlugin:
             req.add_header('Connection', 'keep-alive')
             req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
 
-            if hasattr(self, 'session_cookie') and self.session_cookie:
+            if self.session_cookie:
                 req.add_header('Cookie', self.session_cookie)
+            if self.xsrf_token:
+                req.add_header('X-XSRF-TOKEN', self.xsrf_token)
 
             # Use opener with cookies
             if self.opener:
