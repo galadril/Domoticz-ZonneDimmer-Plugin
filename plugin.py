@@ -204,7 +204,8 @@ class BasePlugin:
             login_page_url = "https://app.zonnedimmer.nl/login"
 
             # Create cookie jar to handle cookies
-            cookie_jar = http.cookiejar.CookieJar()
+            self.cookie_jar = http.cookiejar.CookieJar()
+            cookie_jar = self.cookie_jar
             self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
 
             # Step 1: Get Sanctum CSRF cookie (sets XSRF-TOKEN cookie for SPA auth)
@@ -420,35 +421,52 @@ class BasePlugin:
                     Domoticz.Debug("No token found via localStorage/Sanctum search.")
                     Domoticz.Debug(f"HTML end (last 1000 chars flat): {dashboard_html[-1000:].replace(chr(10), ' ').replace(chr(13), '')}")
 
-            # If no bearer token found in HTML, try several API endpoints
+            # Scan JS near every 'access_token' occurrence to find the token endpoint URL.
+            # The dashboard JS fetches a /api/... endpoint and stores data.access_token in
+            # localStorage — we find that URL and call it with our authenticated session.
             if not self.bearer_token:
-                api_token_endpoints = [
-                    "https://app.zonnedimmer.nl/api/user",
-                    "https://app.zonnedimmer.nl/api/v1/user",
-                    "https://app.zonnedimmer.nl/api/auth/me",
-                    "https://app.zonnedimmer.nl/api/me",
-                ]
-                for endpoint_url in api_token_endpoints:
+                Domoticz.Log("Scanning JS for token endpoint URL near 'access_token'...")
+                token_api_path = None
+                for m in re.finditer(r'access_token', dashboard_html, re.IGNORECASE):
+                    window = dashboard_html[max(0, m.start()-600):m.end()+600]
+                    # Prefer explicit url:/fetch( patterns first
+                    url_match = re.search(r"""(?:url\s*:\s*|fetch\s*\(\s*)['"](\/api\/[^'"?#]{3,80})['"]""", window, re.IGNORECASE)
+                    if not url_match:
+                        url_match = re.search(r"""['"](\/api\/[^'"?#]{3,80})['"]""", window)
+                    if url_match:
+                        token_api_path = url_match.group(1)
+                        Domoticz.Log(f"Token endpoint found in JS: {token_api_path}")
+                        break
+
+                if token_api_path:
+                    token_api_url = f"https://app.zonnedimmer.nl{token_api_path}"
+                    Domoticz.Log(f"Calling token endpoint: {token_api_url}")
                     try:
-                        Domoticz.Log(f"Trying token endpoint: {endpoint_url}")
-                        req = urllib.request.Request(endpoint_url)
+                        req = urllib.request.Request(token_api_url)
                         req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
                         req.add_header('Accept', 'application/json')
                         req.add_header('X-Requested-With', 'XMLHttpRequest')
                         req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
-                        response = self.opener.open(req, timeout=10)
-                        endpoint_data = json.loads(decompress_response(response.read()))
-                        Domoticz.Debug(f"Response from {endpoint_url}: {str(endpoint_data)[:200]}")
-                        for key in ('token', 'access_token', 'api_token', 'bearer_token'):
-                            if key in endpoint_data:
-                                self.bearer_token = endpoint_data[key]
-                                Domoticz.Log(f"Bearer token obtained from {endpoint_url} ({key}): {self.bearer_token[:20]}...")
-                                self.auth_failed_counter = 0
-                                break
-                        if self.bearer_token:
-                            break
-                    except Exception as e:
-                        Domoticz.Debug(f"Could not fetch token from {endpoint_url}: {str(e)}")
+                        if self.xsrf_token:
+                            req.add_header('X-XSRF-TOKEN', self.xsrf_token)
+                        resp = self.opener.open(req, timeout=10)
+                        resp_data = json.loads(decompress_response(resp.read()))
+                        Domoticz.Debug(f"Token endpoint response: {str(resp_data)[:200]}")
+                        token = None
+                        if isinstance(resp_data, dict):
+                            token = (resp_data.get('access_token') or resp_data.get('token')
+                                     or (resp_data.get('data') or {}).get('access_token')
+                                     or (resp_data.get('data') or {}).get('token'))
+                        if token:
+                            self.bearer_token = token
+                            Domoticz.Log(f"Bearer token obtained from JS token endpoint: {token[:20]}...")
+                            self.auth_failed_counter = 0
+                        else:
+                            Domoticz.Log(f"Token endpoint returned no token. Keys: {list(resp_data.keys()) if isinstance(resp_data, dict) else type(resp_data)}")
+                    except Exception as ex:
+                        Domoticz.Log(f"Token endpoint call failed: {str(ex)}")
+                else:
+                    Domoticz.Log("No /api/ token endpoint URL found in JS near 'access_token'")
 
             Domoticz.Log("Login successful!")
             self.login_retry_counter = 0  # Reset retry counter on successful login
