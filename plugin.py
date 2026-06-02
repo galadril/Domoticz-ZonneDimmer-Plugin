@@ -428,64 +428,38 @@ class BasePlugin:
                         break  # only log the first occurrence
                     Domoticz.Debug(f"HTML end (last 1000 chars flat): {dashboard_html[-1000:].replace(chr(10), ' ').replace(chr(13), '')}")
 
-            # Scan JS to find the token refresh endpoint URL.
-            # The dashboard JS has a $.ajax({ url: '...', success: function(data) {
-            # localStorage.setItem("token", data.access_token); } }) pattern.
-            # We search the entire <script> block containing 'access_token' for its url: field.
+            # Call the confirmed token refresh endpoint.
+            # POST /auth/token/refresh with the dashboard's meta csrf-token returns {"access_token": "..."}.
             if not self.bearer_token:
-                Domoticz.Log("Scanning JS for token endpoint URL near 'access_token'...")
-                token_api_path = None
-
-                for m in re.finditer(r'access_token', dashboard_html, re.IGNORECASE):
-                    # Use a large window (3000 chars back) to catch url: defined well before the success callback
-                    window = dashboard_html[max(0, m.start()-3000):m.end()+500]
-                    # Match url: '/...' or url: "/..." — any path, not just /api/
-                    url_match = re.search(r"""url\s*:\s*['"]([^'"?#]{3,80})['"]""", window, re.IGNORECASE)
-                    if not url_match:
-                        # Also try fetch('...') pattern
-                        url_match = re.search(r"""fetch\s*\(\s*['"]([^'"?#]{3,80})['"]""", window, re.IGNORECASE)
-                    if url_match:
-                        candidate = url_match.group(1)
-                        # Skip obviously wrong URLs (login page itself, settings page, etc.)
-                        if candidate not in ('/login', '/dashboard', '/dashboard/settings'):
-                            token_api_path = candidate
-                            Domoticz.Log(f"Token endpoint found in JS: {token_api_path}")
-                            break
-
-                if token_api_path:
-                    if token_api_path.startswith('http'):
-                        token_api_url = token_api_path
-                    elif token_api_path.startswith('/'):
-                        token_api_url = f"https://app.zonnedimmer.nl{token_api_path}"
+                Domoticz.Log("Fetching bearer token from /auth/token/refresh...")
+                meta_csrf_match = re.search(
+                    r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']',
+                    dashboard_html, re.IGNORECASE)
+                meta_csrf = meta_csrf_match.group(1) if meta_csrf_match else None
+                Domoticz.Debug(f"Meta CSRF token: {meta_csrf[:20] if meta_csrf else 'NOT FOUND'}")
+                try:
+                    req = urllib.request.Request(
+                        'https://app.zonnedimmer.nl/auth/token/refresh', data=b'', method='POST')
+                    req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
+                    req.add_header('Accept', 'application/json')
+                    req.add_header('X-Requested-With', 'XMLHttpRequest')
+                    req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
+                    if meta_csrf:
+                        req.add_header('X-CSRF-TOKEN', meta_csrf)
+                    if self.xsrf_token:
+                        req.add_header('X-XSRF-TOKEN', self.xsrf_token)
+                    resp = self.opener.open(req, timeout=10)
+                    resp_data = json.loads(decompress_response(resp.read()))
+                    Domoticz.Debug(f"Token refresh response: {str(resp_data)[:200]}")
+                    token = resp_data.get('access_token') or resp_data.get('token')
+                    if token:
+                        self.bearer_token = token
+                        Domoticz.Log(f"Bearer token obtained from /auth/token/refresh: {token[:20]}...")
+                        self.auth_failed_counter = 0
                     else:
-                        token_api_url = f"https://app.zonnedimmer.nl/{token_api_path}"
-                    Domoticz.Log(f"Calling token endpoint: {token_api_url}")
-                    try:
-                        req = urllib.request.Request(token_api_url)
-                        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
-                        req.add_header('Accept', 'application/json')
-                        req.add_header('X-Requested-With', 'XMLHttpRequest')
-                        req.add_header('Referer', 'https://app.zonnedimmer.nl/dashboard')
-                        if self.xsrf_token:
-                            req.add_header('X-XSRF-TOKEN', self.xsrf_token)
-                        resp = self.opener.open(req, timeout=10)
-                        resp_data = json.loads(decompress_response(resp.read()))
-                        Domoticz.Debug(f"Token endpoint response: {str(resp_data)[:200]}")
-                        token = None
-                        if isinstance(resp_data, dict):
-                            token = (resp_data.get('access_token') or resp_data.get('token')
-                                     or (resp_data.get('data') or {}).get('access_token')
-                                     or (resp_data.get('data') or {}).get('token'))
-                        if token:
-                            self.bearer_token = token
-                            Domoticz.Log(f"Bearer token obtained from JS token endpoint: {token[:20]}...")
-                            self.auth_failed_counter = 0
-                        else:
-                            Domoticz.Log(f"Token endpoint returned no token. Keys: {list(resp_data.keys()) if isinstance(resp_data, dict) else type(resp_data)}")
-                    except Exception as ex:
-                        Domoticz.Log(f"Token endpoint call failed: {str(ex)}")
-                else:
-                    Domoticz.Log("No /api/ token endpoint URL found in JS near 'access_token'")
+                        Domoticz.Log(f"Token refresh returned no token. Keys: {list(resp_data.keys())}")
+                except Exception as ex:
+                    Domoticz.Log(f"Token refresh call failed: {str(ex)}")
 
             Domoticz.Log("Login successful!")
             self.login_retry_counter = 0  # Reset retry counter on successful login
