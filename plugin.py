@@ -419,27 +419,46 @@ class BasePlugin:
                 # If still not found, log end-of-HTML for diagnostics (token scripts injected near </body>)
                 if not self.bearer_token:
                     Domoticz.Debug("No token found via localStorage/Sanctum search.")
+                    # Log the JS block around 'access_token' to see the full token refresh flow
+                    for m in re.finditer(r'access_token', dashboard_html, re.IGNORECASE):
+                        start = max(0, m.start() - 2000)
+                        end = min(len(dashboard_html), m.end() + 500)
+                        block = dashboard_html[start:end].replace('\n', ' ').replace('\r', '')
+                        Domoticz.Debug(f"access_token context (pos {m.start()}, -2000/+500 flat): {block}")
+                        break  # only log the first occurrence
                     Domoticz.Debug(f"HTML end (last 1000 chars flat): {dashboard_html[-1000:].replace(chr(10), ' ').replace(chr(13), '')}")
 
-            # Scan JS near every 'access_token' occurrence to find the token endpoint URL.
-            # The dashboard JS fetches a /api/... endpoint and stores data.access_token in
-            # localStorage — we find that URL and call it with our authenticated session.
+            # Scan JS to find the token refresh endpoint URL.
+            # The dashboard JS has a $.ajax({ url: '...', success: function(data) {
+            # localStorage.setItem("token", data.access_token); } }) pattern.
+            # We search the entire <script> block containing 'access_token' for its url: field.
             if not self.bearer_token:
                 Domoticz.Log("Scanning JS for token endpoint URL near 'access_token'...")
                 token_api_path = None
+
                 for m in re.finditer(r'access_token', dashboard_html, re.IGNORECASE):
-                    window = dashboard_html[max(0, m.start()-600):m.end()+600]
-                    # Prefer explicit url:/fetch( patterns first
-                    url_match = re.search(r"""(?:url\s*:\s*|fetch\s*\(\s*)['"](\/api\/[^'"?#]{3,80})['"]""", window, re.IGNORECASE)
+                    # Use a large window (3000 chars back) to catch url: defined well before the success callback
+                    window = dashboard_html[max(0, m.start()-3000):m.end()+500]
+                    # Match url: '/...' or url: "/..." — any path, not just /api/
+                    url_match = re.search(r"""url\s*:\s*['"]([^'"?#]{3,80})['"]""", window, re.IGNORECASE)
                     if not url_match:
-                        url_match = re.search(r"""['"](\/api\/[^'"?#]{3,80})['"]""", window)
+                        # Also try fetch('...') pattern
+                        url_match = re.search(r"""fetch\s*\(\s*['"]([^'"?#]{3,80})['"]""", window, re.IGNORECASE)
                     if url_match:
-                        token_api_path = url_match.group(1)
-                        Domoticz.Log(f"Token endpoint found in JS: {token_api_path}")
-                        break
+                        candidate = url_match.group(1)
+                        # Skip obviously wrong URLs (login page itself, settings page, etc.)
+                        if candidate not in ('/login', '/dashboard', '/dashboard/settings'):
+                            token_api_path = candidate
+                            Domoticz.Log(f"Token endpoint found in JS: {token_api_path}")
+                            break
 
                 if token_api_path:
-                    token_api_url = f"https://app.zonnedimmer.nl{token_api_path}"
+                    if token_api_path.startswith('http'):
+                        token_api_url = token_api_path
+                    elif token_api_path.startswith('/'):
+                        token_api_url = f"https://app.zonnedimmer.nl{token_api_path}"
+                    else:
+                        token_api_url = f"https://app.zonnedimmer.nl/{token_api_path}"
                     Domoticz.Log(f"Calling token endpoint: {token_api_url}")
                     try:
                         req = urllib.request.Request(token_api_url)
