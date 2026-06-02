@@ -1,5 +1,5 @@
 """
-<plugin key="ZonneDimmer" name="ZonneDimmer Integration" author="galadril" version="1.2.0" wikilink="https://www.zonnedimmer.nl" externallink="https://github.com/galadril/Domoticz-ZonneDimmer-Plugin">
+<plugin key="ZonneDimmer" name="ZonneDimmer Integration" author="galadril" version="1.3.0" wikilink="https://www.zonnedimmer.nl" externallink="https://github.com/galadril/Domoticz-ZonneDimmer-Plugin">
     <description>
         <h2>ZonneDimmer Integration Plugin</h2><br/>
         This plugin integrates Domoticz with ZonneDimmer to control your solar inverter dimming functionality.<br/>
