@@ -304,133 +304,13 @@ class BasePlugin:
             else:
                 Domoticz.Error("No session cookies received from login!")
 
-            # Step 4a: Try REST API login to get token directly (JSON endpoint)
-            try:
-                Domoticz.Log("Trying REST API login for bearer token...")
-                api_login_url = "https://app.zonnedimmer.nl/api/login"
-                login_payload = json.dumps({"email": self.email, "password": self.password}).encode('utf-8')
-                req = urllib.request.Request(api_login_url, data=login_payload, method='POST')
-                req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0')
-                req.add_header('Content-Type', 'application/json')
-                req.add_header('Accept', 'application/json')
-                req.add_header('X-Requested-With', 'XMLHttpRequest')
-                response = self.opener.open(req, timeout=10)
-                api_data = json.loads(decompress_response(response.read()))
-                Domoticz.Debug(f"REST API login response: {str(api_data)[:200]}")
-                for key in ('token', 'access_token', 'bearer_token', 'api_token'):
-                    if key in api_data:
-                        self.bearer_token = api_data[key]
-                        Domoticz.Log(f"Bearer token obtained from REST API login ({key}): {self.bearer_token[:20]}...")
-                        self.auth_failed_counter = 0
-                        break
-                if not self.bearer_token and 'data' in api_data and isinstance(api_data['data'], dict):
-                    for key in ('token', 'access_token'):
-                        if key in api_data['data']:
-                            self.bearer_token = api_data['data'][key]
-                            Domoticz.Log(f"Bearer token obtained from REST API login data.{key}: {self.bearer_token[:20]}...")
-                            self.auth_failed_counter = 0
-                            break
-            except Exception as e:
-                Domoticz.Debug(f"REST API login attempt failed: {str(e)}")
-
-            # Step 4b: Extract bearer token from the login redirect HTML (dashboard page).
-            # Use the already-read body — do NOT make a second GET to /dashboard as that
-            # would miss the token (Laravel flash data already consumed on the first visit).
-            Domoticz.Log("Extracting bearer token from login redirect HTML...")
+            # Step 4: Get bearer token from /auth/token/refresh
             dashboard_html = login_dashboard_html
             Domoticz.Debug(f"Dashboard HTML size: {len(dashboard_html)} bytes")
 
-            # Try multiple patterns to extract bearer token from HTML
-            token_patterns = [
-                # localStorage.setItem('token', '...') — any format, at least 10 chars
-                r'localStorage\.setItem\s*\(\s*["\']token["\']\s*,\s*["\']([^"\']{10,})["\']',
-                # window.token / window.apiToken / window.authToken
-                r'window\.(?:token|apiToken|authToken|bearerToken)\s*=\s*["\']([^"\']{10,})["\']',
-                # meta tag: <meta name="api-token" content="...">
-                r'<meta[^>]+name=["\'](?:api-token|bearer-token|token)["\'][^>]+content=["\']([^"\']{10,})["\']',
-                r'<meta[^>]+content=["\']([^"\']{10,})["\'][^>]+name=["\'](?:api-token|bearer-token|token)["\']',
-                # JSON: "token": "..." or "access_token": "..."
-                r'"(?:token|access_token|api_token)"\s*:\s*"([^"]{10,})"',
-                # Sanctum/Passport number|hash format
-                r'["\']([0-9]{1,6}\|[a-zA-Z0-9]{20,})["\']',
-                # Bearer header values in HTML
-                r'Bearer\s+([\w.|-]{10,})',
-            ]
-
-            for pattern in token_patterns:
-                token_match = re.search(pattern, dashboard_html, re.IGNORECASE)
-                if token_match:
-                    self.bearer_token = token_match.group(1)
-                    Domoticz.Log(f"Bearer token obtained using pattern: {self.bearer_token[:20]}...")
-                    Domoticz.Log(f"Bearer token length: {len(self.bearer_token)} characters")
-                    self.auth_failed_counter = 0  # Reset auth failure counter on successful token extraction
-                    break
-
             if not self.bearer_token:
-                # Bearer token might be set via API call, store session for now
-                Domoticz.Log("Bearer token not found in page, will use session authentication")
-
-                # Search for the exact script tag that should contain the token
-                Domoticz.Debug("Searching for token in <script> tags...")
-                html_lower = dashboard_html.lower()
-
-                # Look for <script> tags in the HTML
-                script_start = html_lower.find('<body')
-                if script_start != -1:
-                    script_section = dashboard_html[script_start:script_start+1000]
-                    Domoticz.Debug(f"First 1000 chars after <body>: {script_section[:500]}")
-
-                # Search for localStorage.setItem with token
-                if 'localstorage' in html_lower:
-                    # Find ALL localStorage occurrences (not just those near setItem)
-                    ls_index = html_lower.find('localstorage')
-                    while ls_index != -1:
-                        # Get 600 chars after each occurrence
-                        start = max(0, ls_index - 150)
-                        end = min(len(dashboard_html), ls_index + 600)
-                        context = dashboard_html[start:end]
-                        # Replace newlines so Domoticz doesn't truncate log output
-                        context_flat = context.replace('\n', ' ').replace('\r', '')
-
-                        Domoticz.Debug(f"localStorage at pos {ls_index} (flat): {context_flat[:400]}")
-
-                        if 'setitem' in context.lower():
-                            # Try to extract token — quoted string (single, double, or backtick)
-                            token_match = re.search(
-                                r'setItem\s*\(\s*["\']token["\']\s*,\s*["\'\`]([^"\'\`]{10,})["\'\`]',
-                                context, re.IGNORECASE)
-                            if token_match:
-                                self.bearer_token = token_match.group(1)
-                                Domoticz.Log(f"Found token in localStorage.setItem: {self.bearer_token[:20]}...")
-                                self.auth_failed_counter = 0
-                                break
-
-                        # Find next occurrence
-                        ls_index = html_lower.find('localstorage', ls_index + 1)
-
-                # Also search for the Sanctum token format anywhere in the HTML
-                if not self.bearer_token:
-                    sanctum_match = re.search(r'["\'\`]([0-9]{1,6}\|[a-zA-Z0-9]{20,})["\'\`]', dashboard_html)
-                    if sanctum_match:
-                        self.bearer_token = sanctum_match.group(1)
-                        Domoticz.Log(f"Found Sanctum token pattern in HTML: {self.bearer_token[:20]}...")
-                        self.auth_failed_counter = 0
-
-                # If still not found, log end-of-HTML for diagnostics (token scripts injected near </body>)
-                if not self.bearer_token:
-                    Domoticz.Debug("No token found via localStorage/Sanctum search.")
-                    # Log the JS block around 'access_token' to see the full token refresh flow
-                    for m in re.finditer(r'access_token', dashboard_html, re.IGNORECASE):
-                        start = max(0, m.start() - 2000)
-                        end = min(len(dashboard_html), m.end() + 500)
-                        block = dashboard_html[start:end].replace('\n', ' ').replace('\r', '')
-                        Domoticz.Debug(f"access_token context (pos {m.start()}, -2000/+500 flat): {block}")
-                        break  # only log the first occurrence
-                    Domoticz.Debug(f"HTML end (last 1000 chars flat): {dashboard_html[-1000:].replace(chr(10), ' ').replace(chr(13), '')}")
-
-            # Call the confirmed token refresh endpoint.
-            # POST /auth/token/refresh with the dashboard's meta csrf-token returns {"access_token": "..."}.
-            if not self.bearer_token:
+                # Call the confirmed token refresh endpoint.
+                # POST /auth/token/refresh with the dashboard's meta csrf-token returns {"access_token": "..."}.
                 Domoticz.Log("Fetching bearer token from /auth/token/refresh...")
                 meta_csrf_match = re.search(
                     r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']',
@@ -450,7 +330,6 @@ class BasePlugin:
                         req.add_header('X-XSRF-TOKEN', self.xsrf_token)
                     resp = self.opener.open(req, timeout=10)
                     resp_data = json.loads(decompress_response(resp.read()))
-                    Domoticz.Debug(f"Token refresh response: {str(resp_data)[:200]}")
                     token = resp_data.get('access_token') or resp_data.get('token')
                     if token:
                         self.bearer_token = token
